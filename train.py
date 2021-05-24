@@ -25,20 +25,20 @@ from models import Effnet, Resnest, Seresnext
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model-dir', type=str, default='./weights')
-    parser.add_argument('--log-dir', type=str, default='./logs')
-    parser.add_argument('--label-dir', type=str, default='./datasets')
+    parser.add_argument('--model-dir', type=str, default='./weights') # 不需要修改
+    parser.add_argument('--log-dir', type=str, default='./logs') # 不需要修改
+    parser.add_argument('--label-dir', type=str, default='./datasets') # 不需要修改
     parser.add_argument('--train-data-dir', type=str, default='./datasets/images/ISIC2020/jpeg/train_1024')
     parser.add_argument('--test-data-dir', type=str, default='./datasets/images/ISIC2020/jpeg/test_1024')
     parser.add_argument('--CUDA_VISIBLE_DEVICES', type=str, default='0')
     parser.add_argument('--enet-type', type=str, default='efficientnet_b3')
-    parser.add_argument('--kernel-type', type=str) # 模型保存名字，不指定则使用默认名称
+    parser.add_argument('--kernel-type', type=str) # 模型保存名字，不指定则使用默认名称，不需要修改
     parser.add_argument('--out-dim', type=int, default=9) # 9分类
     parser.add_argument('--image-size', type=int, default=512)  # resize后的图像大小
     parser.add_argument('--fold-type',type=str,default='') # 将20个fold映射为五个，可选为'fold+' 'fold++' ''
     parser.add_argument('--train-fold', type=str, default='0,1,2,3,4') # train folds分别作为验证集
     parser.add_argument('--freeze-cnn', action='store_true', default=False) # 冻结CNN参数
-    parser.add_argument('--DANN', action='store_true', default=False) # 是否使用DANN
+    parser.add_argument('--DANN', action='store_true', default=False) # 是否使用DANN毛发消除
     parser.add_argument('--use-meta', action='store_true', default=True) # 是否使用meta
     parser.add_argument('--meta-model', type=str, default='joint') # meta模型,joint or adadec
     parser.add_argument('--cc', action='store_true', default=True) # color constancy

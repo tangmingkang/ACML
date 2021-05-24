@@ -10,6 +10,8 @@ pip install -r requirements.txt
 数据
 ```bash
 python resize.py # 将数据resize到1024*1024 加快计算速度 非必须（自行修改地址）
+cd datasets
+ln -s /home/data/ISIC images # 设置软链接 非必须
 ```
 训练模型(注意修改数据路径,运行时DEBUG设置为false)
 ```bash
