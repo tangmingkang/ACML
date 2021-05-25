@@ -19,3 +19,4 @@ chmod a+x ./scripts/train.sh
 ./scripts/train.sh
 ```
 **注：kernel_type指定参数文件与日志文件名称，未设置时使用默认命名**
+**注：单机多卡代码必须使用torch.distributed.launch启动，nproc_per_node指定GPU数量**

@@ -9,20 +9,14 @@ import pandas as pd
 import pdb
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import StratifiedKFold
 import torch
-from torch.utils.data import DataLoader, Dataset
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.optim import lr_scheduler
-from torch.utils.data.sampler import RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
-from torch.optim.lr_scheduler import CosineAnnealingLR
 from util.warmup_scheduler import GradualWarmupSchedulerV2
 from dataset import get_df, get_transforms, MMDataset
 from models import Effnet, Resnest, Seresnext
-
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -31,14 +25,13 @@ def get_args():
     parser.add_argument('--label-dir', type=str, default='./datasets') # 不需要修改
     parser.add_argument('--train-data-dir', type=str, default='./datasets/images/ISIC2020/jpeg/train_1024')
     parser.add_argument('--test-data-dir', type=str, default='./datasets/images/ISIC2020/jpeg/test_1024')
-    parser.add_argument('--CUDA_VISIBLE_DEVICES', type=str, default='0,1,4,5')
+    parser.add_argument('--CUDA_VISIBLE_DEVICES', type=str, default='6')
     parser.add_argument('--enet-type', type=str, default='efficientnet_b3')
-    parser.add_argument('--kernel-type', type=str, default='') # 模型保存名字，不指定则使用默认名称，不需要修改
+    parser.add_argument('--kernel-type', type=str, default='efficientnet_b3_size512_outdim9_bs64_metaj') # 指定用于验证的模型
     parser.add_argument('--out-dim', type=int, default=9) # 9分类
     parser.add_argument('--image-size', type=int, default=512)  # resize后的图像大小
     parser.add_argument('--fold-type',type=str,default='') # 将20个fold映射为五个，可选为'fold+' 'fold++' ''
-    parser.add_argument('--train-fold', type=str, default='0,1,2,3,4') # train folds分别作为验证集
-    parser.add_argument('--freeze-cnn', action='store_true', default=False) # 冻结CNN参数
+    parser.add_argument('--val-fold', type=str, default='0') # val folds分别作为验证集
     parser.add_argument('--DANN', action='store_true', default=False) # 是否使用DANN毛发消除
     parser.add_argument('--use-meta', action='store_true', default=True) # 是否使用meta
     parser.add_argument('--meta-model', type=str, default='joint') # meta模型,joint or adadec
@@ -46,15 +39,9 @@ def get_args():
     parser.add_argument('--cc-method', type=str, default='max_rgb') # color constancy method
     parser.add_argument('--n_meta_dim', type=str, default='512,128')
     parser.add_argument('--DEBUG', action='store_true', default=False)
-    parser.add_argument('--batch-size', type=int, default=32)
+    parser.add_argument('--eval', type=str, choices=['best', 'final'], default="best")
     parser.add_argument('--batch-eval-size', type=int, default=16)
-    parser.add_argument('--init-lr', type=float, default=3e-5)
-    parser.add_argument('--n-epochs', type=int, default=15)
     parser.add_argument('--num-workers', type=int, default=16)
-    parser.add_argument('--n-gpu', type=int, default=1)
-    parser.add_argument('--local-rank', type=int, default=0)
-    parser.add_argument('--rank', type=int, default=0)
-    parser.add_argument('--world-size', type=int, default=0)
     args, _ = parser.parse_known_args()
     return args
 
@@ -70,7 +57,6 @@ def get_trans(img, I):
         return img.flip(3)
     elif I % 4 == 3:
         return img.flip(2).flip(3)
-
 
 def val_epoch(model, loader, mel_idx, n_test=1, get_output=False):
     model.eval()
@@ -278,81 +264,46 @@ def train_epoch(epoch, model, loader, optimizer):
         return train_loss, 0
 
 
-def run(fold, df, transforms_train, transforms_val, _idx, log_file):
-    if args.local_rank==0:
-        with open(log_file, 'w') as appender:
-            args_str = json.dumps(vars(args), indent=4,ensure_ascii=False, sort_keys=False,separators=(',', ':'))
-            appender.write(args_str+"\n")
-    args.n_gpu=torch.cuda.device_count()
-    print(f'device: {device} n_gpu: {args.n_gpu}')
+def run(fold, df, transforms_val, _idx, log_file):
+    with open(log_file, 'a') as appender:
+        appender.write(f'fold{fold} {args.kernel_type}\n')
     if args.DEBUG:
         args.n_epochs = 3
-        df_train = df[df['fold'] != fold].sample(args.batch_size * 5)
         df_valid = df[df['fold'] == fold].sample(args.batch_size * 5)
     else:
-        df_train = df[df['fold'] != fold]
         df_valid = df[df['fold'] == fold]
-
-    dataset_train = MMDataset(args, df_train, 'train', transform=transforms_train)
     dataset_valid = MMDataset(args, df_valid, 'valid', transform=transforms_val)
-    train_sample=DistributedSampler(dataset_train)
-    train_loader = torch.utils.data.DataLoader(dataset_train, batch_size=args.batch_size//args.n_gpu,
-                                               sampler=train_sample,
-                                               num_workers=args.num_workers)
     valid_loader = torch.utils.data.DataLoader(dataset_valid, batch_size=args.batch_eval_size, num_workers=args.num_workers)
     model = ModelClass(args).to(device)
-    model = nn.parallel.DistributedDataParallel(model,device_ids=[args.local_rank],output_device=args.local_rank)
-    # model = model.to(device)
-
-    auc_max = 0.
     
-    model_file_best  = os.path.join(args.model_dir, f'{args.kernel_type}_best.pth')
-    model_file_final = os.path.join(args.model_dir, f'{args.kernel_type}_final.pth')
-
-    if args.freeze_cnn:
-        optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.init_lr)
-    else:
-        optimizer = optim.Adam(model.parameters(), lr=args.init_lr)      
-    scheduler_cosine = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, args.n_epochs - 1)
-    scheduler_warmup = GradualWarmupSchedulerV2(optimizer, multiplier=10, total_epoch=1,
-                                                after_scheduler=scheduler_cosine)
+    model_file  = os.path.join(args.model_dir, f'{args.kernel_type}_{args.eval}.pth')
     
-    num_normal, num_mm, num_hair, num_unhair = dataset_train.get_num()
-    content=f'total num of train:{len(dataset_train)},mm:{num_mm},normal:{num_normal},hair:{num_hair},unhair:{num_unhair}'+'\n'
+    try:  # single GPU model_file
+        model.load_state_dict(torch.load(model_file), strict=True)
+    except:  # multi GPU model_file
+        state_dict = torch.load(model_file)
+        state_dict = {k[7:] if k.startswith('module.') else k: state_dict[k] for k in state_dict.keys()}
+        model.load_state_dict(state_dict, strict=True)
+
     num_normal, num_mm, num_hair, num_unhair = dataset_valid.get_num()
-    content+=f'total num of val:{len(dataset_valid)},mm:{num_mm},normal:{num_normal},hair:{num_hair},unhair:{num_unhair}'+'\n'
-    if args.local_rank==0:
-        with open(log_file, 'a') as appender:
-            appender.write(content)
-
-    for epoch in range(1, args.n_epochs + 1):
-        train_sample.set_epoch(epoch-1)
-        if args.local_rank==0:
-            print(time.ctime(), f'Epoch {epoch}')
-        train_loss, barrier_train_loss = train_epoch(epoch, model, train_loader, optimizer)
-        if args.local_rank==0:
-            if args.DANN:
-                val_loss, acc, auc, acc_0, acc_1, barrier_val_loss, barrier_acc, barrier_auc, barrier_acc_0, barrier_acc_1= val_epoch(model, valid_loader, _idx)
-                content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, train loss: {train_loss:.5f}, valid loss: {(val_loss):.5f}, acc: {(acc):.4f}, auc: {(auc):.6f} acc_0: {(acc_0):.6f}, acc_1: {(acc_1):.6f}.'+'\n'
-                content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, barrier train loss: {barrier_train_loss:.5f}, barrier valid loss: {(barrier_val_loss):.5f}, acc: {(barrier_acc):.4f}, auc: {(barrier_auc):.6f} acc_0: {(barrier_acc_0):.6f}, acc_1: {(barrier_acc_1):.6f}.'
-                print(content)
-            else:
-                val_loss, acc, auc, acc_0, acc_1= val_epoch(model, valid_loader, _idx)
-                content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, train loss: {train_loss:.5f}, valid loss: {(val_loss):.5f}, acc: {(acc):.4f}, auc: {(auc):.6f} acc_0: {(acc_0):.6f}, acc_1: {(acc_1):.6f}.'
-                print(content)
-            with open(log_file, 'a') as appender:
-                appender.write(content + '\n')
-            if auc > auc_max:
-                print('auc_max ({:.6f} --> {:.6f}). Saving model ...'.format(auc_max, auc))
-                torch.save(model.module.state_dict(), model_file_best)
-                auc_max = auc
-
-        scheduler_warmup.step()
-        if epoch == 2: scheduler_warmup.step()  # bug workaround
-
-
-    torch.save(model.state_dict(), model_file_final)
-
+    content=f'total num of val:{len(dataset_valid)},mm:{num_mm},normal:{num_normal},hair:{num_hair},unhair:{num_unhair}'+'\n'
+    with open(log_file, 'a') as appender:
+        appender.write(content)
+    if args.DANN:
+        val_loss, acc, auc, acc_0, acc_1, barrier_val_loss, barrier_acc, barrier_auc, barrier_acc_0, barrier_acc_1= val_epoch(model, valid_loader, _idx)
+        content = time.ctime() + f'valid loss: {(val_loss):.5f}, acc: {(acc):.4f}, auc: {(auc):.6f} acc_0: {(acc_0):.6f}, acc_1: {(acc_1):.6f}.'+'\n'
+        content = time.ctime() + f'barrier valid loss: {(barrier_val_loss):.5f}, acc: {(barrier_acc):.4f}, auc: {(barrier_auc):.6f} acc_0: {(barrier_acc_0):.6f}, acc_1: {(barrier_acc_1):.6f}.'
+        print(content)
+    else:
+        val_loss, acc, auc, acc_0, acc_1= val_epoch(model, valid_loader, _idx)
+        content = time.ctime() + ' ' + f'valid loss: {(val_loss):.5f}, acc: {(acc):.4f}, auc: {(auc):.6f} acc_0: {(acc_0):.6f}, acc_1: {(acc_1):.6f}.'
+        print(content)
+    with open(log_file, 'a') as appender:
+        appender.write(content + '\n')
+    ACC.append(acc)
+    AUC.append(auc)
+    ACC_0.append(acc_0)
+    ACC_1.append(acc_1)
 
 def set_seed(seed=0):
     random.seed(seed)
@@ -363,12 +314,11 @@ def set_seed(seed=0):
     torch.backends.cudnn.deterministic = True
 
 if __name__ == '__main__':
-
+    ACC=[]
+    AUC=[]
+    ACC_0=[]
+    ACC_1=[]
     args = get_args()
-    os.makedirs(args.model_dir, exist_ok=True)
-    os.makedirs(args.log_dir, exist_ok=True)
-    os.makedirs(args.model_dir+'/debug', exist_ok=True)
-    os.makedirs(args.log_dir+'/debug', exist_ok=True)
     os.environ['CUDA_VISIBLE_DEVICES'] = args.CUDA_VISIBLE_DEVICES
 
     if args.enet_type == 'resnest101':
@@ -379,16 +329,9 @@ if __name__ == '__main__':
         ModelClass = Effnet
     else:
         raise NotImplementedError()
-    
 
-    DP = len(os.environ['CUDA_VISIBLE_DEVICES']) > 1
-    if DP:
-        torch.distributed.init_process_group(backend="nccl")
-        args.local_rank = torch.distributed.get_rank()
-        args.word_size = torch.distributed.get_world_size()
-        torch.cuda.set_device(args.local_rank)
-    device = torch.device("cuda", args.local_rank)
-    set_seed(args.local_rank+1)
+    device = torch.device("cuda")
+    set_seed()
 
     criterion = nn.CrossEntropyLoss()
     if args.DANN:
@@ -396,28 +339,19 @@ if __name__ == '__main__':
     
     df_train, df_test, _idx = get_df(args)
     transforms_train, transforms_val = get_transforms(args.image_size)
-    folds = [int(i) for i in args.train_fold.split(',')]
+    folds = [int(i) for i in args.val_fold.split(',')]
     kernel_type=args.kernel_type
+    if args.DEBUG:
+        log_file=os.path.join(args.log_dir+'/debug', f'log_{kernel_type}_{args.eval}val.txt')
+    else:
+        log_file=os.path.join(args.log_dir, f'log_{kernel_type}_{args.eval}val.txt')
+        
     for fold in folds:
-        if not kernel_type:
-            args.kernel_type=f'{args.enet_type}_size{args.image_size}_outdim{args.out_dim}_bs{args.batch_size}'
-            if args.freeze_cnn:
-                args.kernel_type+='_freeze'
-            if args.use_meta:
-                args.kernel_type+='_meta'
-                if args.meta_model=='joint':
-                    args.kernel_type+='j' # metaj
-                if args.meta_model=='adadec':
-                    args.kernel_type+='a' # metaa  
-            if args.DANN:
-                args.kernel_type+='_DANN'
-        else:
-            args.kernel_type=kernel_type
+        args.kernel_type=kernel_type
         args.kernel_type+=f'_{args.fold_type}{fold}'
+        run(fold, df_train, transforms_val, _idx, log_file)
 
-        if args.DEBUG:
-            log_file=os.path.join(args.log_dir+'/debug', f'log_{args.kernel_type}.txt')
-        else:
-            log_file=os.path.join(args.log_dir, f'log_{args.kernel_type}.txt')
-        run(fold, df_train, transforms_train, transforms_val, _idx, log_file)
-    
+    with open(log_file, 'a') as appender:
+        appender.write(f'all folds {args.val_fold} {kernel_type}\n')
+        content = f'mean acc: {(np.mean(ACC)):.4f}, mean auc: {(np.mean(AUC)):.6f} mean acc_0: {(np.mean(ACC_0)):.6f}, mean acc_1: {(np.mean(ACC_1)):.6f}.'
+        appender.write(content + '\n')

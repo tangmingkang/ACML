@@ -81,9 +81,9 @@ class Effnet(nn.Module):
         x = self.enet(x)
         return x
 
-    def forward(self, x, x_meta=None, alpha=0):
+    def forward(self, x, x_meta=None, alpha=0, test=False):
         x = self.extract(x).squeeze(-1).squeeze(-1)
-        if self.DANN:
+        if self.DANN and not test:
             barrier_x = ReverseLayerF.apply(x,alpha)
             barrier_out = self.barrier_classifier(barrier_x)
         if self.use_meta:
@@ -101,7 +101,7 @@ class Effnet(nn.Module):
             else:
                 out += self.myfc(dropout(x))
         out /= len(self.dropouts)
-        if self.DANN:
+        if self.DANN and not test:
             return out,barrier_out
         else:
             return out 
