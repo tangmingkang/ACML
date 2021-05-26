@@ -14,9 +14,11 @@ cd datasets
 ln -s /home/data/ISIC images # 设置软链接 非必须
 ```
 训练模型(注意修改数据路径,运行时DEBUG设置为false)
+5.26 发现一个bug，会导致多卡训练时fold0训练结束后，在fold1卡住，暂时未解决，设置train-fold为单个fold或使用main.py避免train.py中训练多个fold
 ```bash
-chmod a+x ./scripts/train.sh
-./scripts/train.sh
+# chmod a+x ./scripts/train.sh
+# ./scripts/train.sh
+nohup python main.py >main.log 2>&1 & # 注意保证lock.txt 运行之前开锁（为0）
 ```
 **注：kernel_type指定参数文件与日志文件名称，未设置时使用默认命名**
 **注：单机多卡代码必须使用torch.distributed.launch启动，nproc_per_node指定GPU数量**

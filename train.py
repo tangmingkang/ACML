@@ -37,7 +37,7 @@ def get_args():
     parser.add_argument('--out-dim', type=int, default=9) # 9分类
     parser.add_argument('--image-size', type=int, default=512)  # resize后的图像大小
     parser.add_argument('--fold-type',type=str,default='') # 将20个fold映射为五个，可选为'fold+' 'fold++' ''
-    parser.add_argument('--train-fold', type=str, default='0,1,2,3,4') # train folds分别作为验证集
+    parser.add_argument('--train-fold', type=str, default='0') # train folds分别作为验证集
     parser.add_argument('--freeze-cnn', action='store_true', default=False) # 冻结CNN参数
     parser.add_argument('--DANN', action='store_true', default=False) # 是否使用DANN毛发消除
     parser.add_argument('--use-meta', action='store_true', default=True) # 是否使用meta
@@ -72,7 +72,7 @@ def get_trans(img, I):
         return img.flip(2).flip(3)
 
 
-def val_epoch(model, loader, mel_idx, n_test=1, get_output=False):
+def val_epoch(model, loader, mel_idx, criterion, barrier_criterion, device, n_test=1, get_output=False):
     model.eval()
     class_val_loss = []
     barrier_val_loss = []
@@ -218,7 +218,7 @@ def val_epoch(model, loader, mel_idx, n_test=1, get_output=False):
             
             return class_val_loss, class_acc, class_auc, class_acc_0, class_acc_1
 
-def train_epoch(epoch, model, loader, optimizer):
+def train_epoch(epoch, model, loader, optimizer,  criterion, barrier_criterion, device):
     model.train()
     train_loss = []
     barrier_train_loss = []
@@ -284,7 +284,7 @@ def run(fold, df, transforms_train, transforms_val, _idx, log_file):
             args_str = json.dumps(vars(args), indent=4,ensure_ascii=False, sort_keys=False,separators=(',', ':'))
             appender.write(args_str+"\n")
     args.n_gpu=torch.cuda.device_count()
-    print(f'device: {device} n_gpu: {args.n_gpu}')
+
     if args.DEBUG:
         args.n_epochs = 3
         df_train = df[df['fold'] != fold].sample(args.batch_size * 5)
@@ -293,6 +293,11 @@ def run(fold, df, transforms_train, transforms_val, _idx, log_file):
         df_train = df[df['fold'] != fold]
         df_valid = df[df['fold'] == fold]
 
+    device = torch.device("cuda", args.local_rank)
+    print(f'device: {device} n_gpu: {args.n_gpu}')
+    criterion = nn.CrossEntropyLoss()
+    barrier_criterion = nn.CrossEntropyLoss()
+    
     dataset_train = MMDataset(args, df_train, 'train', transform=transforms_train)
     dataset_valid = MMDataset(args, df_valid, 'valid', transform=transforms_val)
     train_sample=DistributedSampler(dataset_train)
@@ -300,7 +305,8 @@ def run(fold, df, transforms_train, transforms_val, _idx, log_file):
                                                sampler=train_sample,
                                                num_workers=args.num_workers)
     valid_loader = torch.utils.data.DataLoader(dataset_valid, batch_size=args.batch_eval_size, num_workers=args.num_workers)
-    model = ModelClass(args).to(device)
+    model = ModelClass(args)
+    model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
     model = nn.parallel.DistributedDataParallel(model,device_ids=[args.local_rank],output_device=args.local_rank)
     # model = model.to(device)
 
@@ -308,7 +314,6 @@ def run(fold, df, transforms_train, transforms_val, _idx, log_file):
     
     model_file_best  = os.path.join(args.model_dir, f'{args.kernel_type}_best.pth')
     model_file_final = os.path.join(args.model_dir, f'{args.kernel_type}_final.pth')
-
     if args.freeze_cnn:
         optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.init_lr)
     else:
@@ -329,7 +334,7 @@ def run(fold, df, transforms_train, transforms_val, _idx, log_file):
         train_sample.set_epoch(epoch-1)
         if args.local_rank==0:
             print(time.ctime(), f'Epoch {epoch}')
-        train_loss, barrier_train_loss = train_epoch(epoch, model, train_loader, optimizer)
+        train_loss, barrier_train_loss = train_epoch(epoch, model, train_loader, optimizer, criterion, barrier_criterion, device)
         if args.local_rank==0:
             if args.DANN:
                 val_loss, acc, auc, acc_0, acc_1, barrier_val_loss, barrier_acc, barrier_auc, barrier_acc_0, barrier_acc_1= val_epoch(model, valid_loader, _idx)
@@ -337,7 +342,7 @@ def run(fold, df, transforms_train, transforms_val, _idx, log_file):
                 content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, barrier train loss: {barrier_train_loss:.5f}, barrier valid loss: {(barrier_val_loss):.5f}, acc: {(barrier_acc):.4f}, auc: {(barrier_auc):.6f} acc_0: {(barrier_acc_0):.6f}, acc_1: {(barrier_acc_1):.6f}.'
                 print(content)
             else:
-                val_loss, acc, auc, acc_0, acc_1= val_epoch(model, valid_loader, _idx)
+                val_loss, acc, auc, acc_0, acc_1= val_epoch(model, valid_loader, _idx, criterion, barrier_criterion, device)
                 content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, train loss: {train_loss:.5f}, valid loss: {(val_loss):.5f}, acc: {(acc):.4f}, auc: {(auc):.6f} acc_0: {(acc_0):.6f}, acc_1: {(acc_1):.6f}.'
                 print(content)
             with open(log_file, 'a') as appender:
@@ -350,8 +355,8 @@ def run(fold, df, transforms_train, transforms_val, _idx, log_file):
         scheduler_warmup.step()
         if epoch == 2: scheduler_warmup.step()  # bug workaround
 
-
-    torch.save(model.state_dict(), model_file_final)
+    if args.local_rank==0:
+        torch.save(model.state_dict(), model_file_final)
 
 
 def set_seed(seed=0):
@@ -380,22 +385,10 @@ if __name__ == '__main__':
     else:
         raise NotImplementedError()
     
-
-    DP = len(os.environ['CUDA_VISIBLE_DEVICES']) > 1
-    if DP:
-        torch.distributed.init_process_group(backend="nccl")
-        args.local_rank = torch.distributed.get_rank()
-        args.word_size = torch.distributed.get_world_size()
-        torch.cuda.set_device(args.local_rank)
-    device = torch.device("cuda", args.local_rank)
     set_seed(args.local_rank+1)
-
-    criterion = nn.CrossEntropyLoss()
-    if args.DANN:
-        barrier_criterion = nn.CrossEntropyLoss()
+    torch.distributed.init_process_group(backend="nccl")
     
     df_train, df_test, _idx = get_df(args)
-    transforms_train, transforms_val = get_transforms(args.image_size)
     folds = [int(i) for i in args.train_fold.split(',')]
     kernel_type=args.kernel_type
     for fold in folds:
@@ -415,9 +408,21 @@ if __name__ == '__main__':
             args.kernel_type=kernel_type
         args.kernel_type+=f'_{args.fold_type}{fold}'
 
+        DP = len(os.environ['CUDA_VISIBLE_DEVICES']) > 1
+        if DP:
+            args.local_rank = torch.distributed.get_rank()
+            args.word_size = torch.distributed.get_world_size()
+            torch.cuda.set_device(args.local_rank)
+
+        transforms_train, transforms_val = get_transforms(args.image_size)
+
         if args.DEBUG:
             log_file=os.path.join(args.log_dir+'/debug', f'log_{args.kernel_type}.txt')
         else:
             log_file=os.path.join(args.log_dir, f'log_{args.kernel_type}.txt')
         run(fold, df_train, transforms_train, transforms_val, _idx, log_file)
+        time.sleep(10) # 同步 😁
+    f=open('lock.txt','w')
+    f.write('0')
+    f.close()
     
