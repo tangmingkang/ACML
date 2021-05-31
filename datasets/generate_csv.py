@@ -12,7 +12,7 @@ df_test = pd.read_csv(os.path.join(data_dir_2020, 'test.csv'))
 df_hair = pd.read_csv(os.path.join('./hair.csv'))
 train_fold = pd.read_csv(os.path.join('./fold.csv'))
 df_train['hair']=df_hair['label'].fillna(-1).astype(int)
-hair_map={-1:0,0:0,1:1,2:1,3:1,4:1,10:1,41:1}
+hair_map={-1:0,0:0,1:1,2:1,3:1,4:1}
 df_train['hair']=df_train['hair'].map(hair_map)
 # fold = []
 # for index, row in df_train.iterrows():

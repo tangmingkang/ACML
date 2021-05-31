@@ -35,7 +35,8 @@ class MMDataset(Dataset):
     def __getitem__(self, index):
         row = self.csv.iloc[index]
         image = cv2.imread(row.filepath) # 默认读出的是BGR模式
-        image = self.cc_model(image)
+        if self.cc:
+            image = self.cc_model(image)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB) # m*n*3
         if self.transform is not None:
             res = self.transform(image=image)

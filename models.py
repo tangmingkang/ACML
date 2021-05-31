@@ -62,18 +62,17 @@ class Effnet(nn.Module):
                 nn.BatchNorm1d(self.n_meta_dim[1]),
                 Swish_Module(),
             )
-            if args.meta_model=='joint':
+            if self.meta_model=='joint':
                 in_ch += self.n_meta_dim[1]
-            if args.meta_model=='adadec':
+            if self.meta_model=='adadec':
                 self.attention=nn.Linear(self.n_meta_dim[1],in_ch)
-                
         if args.DANN:
             self.barrier_classifier = nn.Sequential(
                 nn.Linear(self.enet.classifier.in_features,100),
                 nn.BatchNorm1d(100),
                 nn.ReLU(True),
                 nn.Linear(100, 2)
-            )
+            )    
         self.myfc = nn.Linear(in_ch, args.out_dim)
         self.enet.classifier = nn.Identity()
 

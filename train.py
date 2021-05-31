@@ -31,26 +31,27 @@ def get_args():
     parser.add_argument('--label-dir', type=str, default='./datasets') # 不需要修改
     parser.add_argument('--train-data-dir', type=str, default='./datasets/images/ISIC2020/jpeg/train_1024')
     parser.add_argument('--test-data-dir', type=str, default='./datasets/images/ISIC2020/jpeg/test_1024')
-    parser.add_argument('--CUDA_VISIBLE_DEVICES', type=str, default='0,1,4,5')
-    parser.add_argument('--enet-type', type=str, default='efficientnet_b3')
+    parser.add_argument('--lock-file', type=str, default='lock.txt')
+    parser.add_argument('--CUDA_VISIBLE_DEVICES', type=str, default='0,1,2,4')
+    parser.add_argument('--enet-type', type=str, default='efficientnet_b7')
     parser.add_argument('--kernel-type', type=str, default='') # 模型保存名字，不指定则使用默认名称，不需要修改
     parser.add_argument('--out-dim', type=int, default=9) # 9分类
     parser.add_argument('--image-size', type=int, default=512)  # resize后的图像大小
     parser.add_argument('--fold-type',type=str,default='') # 将20个fold映射为五个，可选为'fold+' 'fold++' ''
     parser.add_argument('--train-fold', type=str, default='0') # train folds分别作为验证集
     parser.add_argument('--freeze-cnn', action='store_true', default=False) # 冻结CNN参数
-    parser.add_argument('--DANN', action='store_true', default=False) # 是否使用DANN毛发消除
+    parser.add_argument('--DANN', action='store_true', default=True) # 是否使用DANN毛发消除
     parser.add_argument('--use-meta', action='store_true', default=True) # 是否使用meta
     parser.add_argument('--meta-model', type=str, default='joint') # meta模型,joint or adadec
     parser.add_argument('--cc', action='store_true', default=True) # color constancy
     parser.add_argument('--cc-method', type=str, default='max_rgb') # color constancy method
     parser.add_argument('--n_meta_dim', type=str, default='512,128')
     parser.add_argument('--DEBUG', action='store_true', default=False)
-    parser.add_argument('--batch-size', type=int, default=32)
+    parser.add_argument('--batch-size', type=int, default=64)
     parser.add_argument('--batch-eval-size', type=int, default=16)
     parser.add_argument('--init-lr', type=float, default=3e-5)
     parser.add_argument('--n-epochs', type=int, default=15)
-    parser.add_argument('--num-workers', type=int, default=16)
+    parser.add_argument('--num-workers', type=int, default=8)
     parser.add_argument('--n-gpu', type=int, default=1)
     parser.add_argument('--local-rank', type=int, default=0)
     parser.add_argument('--rank', type=int, default=0)
@@ -337,9 +338,9 @@ def run(fold, df, transforms_train, transforms_val, _idx, log_file):
         train_loss, barrier_train_loss = train_epoch(epoch, model, train_loader, optimizer, criterion, barrier_criterion, device)
         if args.local_rank==0:
             if args.DANN:
-                val_loss, acc, auc, acc_0, acc_1, barrier_val_loss, barrier_acc, barrier_auc, barrier_acc_0, barrier_acc_1= val_epoch(model, valid_loader, _idx)
+                val_loss, acc, auc, acc_0, acc_1, barrier_val_loss, barrier_acc, barrier_auc, barrier_acc_0, barrier_acc_1= val_epoch(model, valid_loader, _idx, criterion, barrier_criterion, device)
                 content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, train loss: {train_loss:.5f}, valid loss: {(val_loss):.5f}, acc: {(acc):.4f}, auc: {(auc):.6f} acc_0: {(acc_0):.6f}, acc_1: {(acc_1):.6f}.'+'\n'
-                content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, barrier train loss: {barrier_train_loss:.5f}, barrier valid loss: {(barrier_val_loss):.5f}, acc: {(barrier_acc):.4f}, auc: {(barrier_auc):.6f} acc_0: {(barrier_acc_0):.6f}, acc_1: {(barrier_acc_1):.6f}.'
+                content += time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, barrier train loss: {barrier_train_loss:.5f}, barrier valid loss: {(barrier_val_loss):.5f}, acc: {(barrier_acc):.4f}, auc: {(barrier_auc):.6f} acc_0: {(barrier_acc_0):.6f}, acc_1: {(barrier_acc_1):.6f}.'
                 print(content)
             else:
                 val_loss, acc, auc, acc_0, acc_1= val_epoch(model, valid_loader, _idx, criterion, barrier_criterion, device)
@@ -402,6 +403,8 @@ if __name__ == '__main__':
                     args.kernel_type+='j' # metaj
                 if args.meta_model=='adadec':
                     args.kernel_type+='a' # metaa  
+            if args.cc:
+                args.kernel_type+='_cc'+args.cc_method
             if args.DANN:
                 args.kernel_type+='_DANN'
         else:
@@ -421,8 +424,8 @@ if __name__ == '__main__':
         else:
             log_file=os.path.join(args.log_dir, f'log_{args.kernel_type}.txt')
         run(fold, df_train, transforms_train, transforms_val, _idx, log_file)
-        time.sleep(10) # 同步 😁
-    f=open('lock.txt','w')
+        time.sleep(60) # 同步 😁
+    f=open(args.lock_file,'w')
     f.write('0')
     f.close()
     
