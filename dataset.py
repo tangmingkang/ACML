@@ -93,9 +93,9 @@ def get_transforms(image_size):
     return transforms_train, transforms_val
 
 def get_df(args):
-    df_train = pd.read_csv(os.path.join(args.label_dir, 'train.csv'), dtype={'image_name':str})
+    df_train = pd.read_csv(os.path.join(args.label_dir, f'outdim{args.out_dim}_dann{args.n_dann_dim}/train.csv'), dtype={'image_name':str})
     df_train['filepath'] = df_train['image_name'].apply(lambda x: os.path.join(args.train_data_dir, f'{x}.jpg'))
-    df_test = pd.read_csv(os.path.join(args.label_dir, 'test.csv'), dtype={'image_name':str})
+    df_test = pd.read_csv(os.path.join(args.label_dir, f'outdim{args.out_dim}_dann{args.n_dann_dim}/test.csv'), dtype={'image_name':str})
     df_test['filepath'] = df_test['image_name'].apply(lambda x: os.path.join(args.test_data_dir, f'{x}.jpg'))
     if args.fold_type=='fold+':
         foldmap = {
@@ -116,5 +116,8 @@ def get_df(args):
     else:
         foldmap = {i: i % 5 for i in range(20)}
     df_train['fold'] = df_train['fold'].map(foldmap)
-    _idx=4 # 4对应为mm
+    if args.out_dim==9:
+        _idx=4 # 4对应为mm
+    else:
+        _idx=1
     return df_train,df_test, _idx

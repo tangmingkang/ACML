@@ -36,7 +36,7 @@ def get_args():
     parser.add_argument('--CUDA_VISIBLE_DEVICES', type=str, default='0,1,2,3')
     parser.add_argument('--enet-type', type=str, default='tf_efficientnet_b5_ns')
     parser.add_argument('--kernel-type', type=str, default='') # 模型保存名字，不指定则使用默认名称，不需要修改
-    parser.add_argument('--out-dim', type=int, default=9) # 9分类
+    parser.add_argument('--out-dim', type=int, default=2) # 9分类
     parser.add_argument('--image-size', type=int, default=512)  # resize后的图像大小
     parser.add_argument('--fold-type',type=str,default='') # 将20个fold映射为五个，可选为'fold+' 'fold++' ''
     parser.add_argument('--train-fold', type=str, default='0') # train folds分别作为验证集
@@ -49,11 +49,11 @@ def get_args():
     parser.add_argument('--cc-method', type=str, default='max_rgb') # color constancy method
     parser.add_argument('--n_meta_dim', type=str, default='512,128')
     parser.add_argument('--DEBUG', action='store_true', default=False)
-    parser.add_argument('--batch-size', type=int, default=8)
-    parser.add_argument('--batch-eval-size', type=int, default=4)
+    parser.add_argument('--batch-size', type=int, default=32)
+    parser.add_argument('--batch-eval-size', type=int, default=8)
     parser.add_argument('--init-lr', type=float, default=3e-5)
     parser.add_argument('--n-epochs', type=int, default=20)
-    parser.add_argument('--num-workers', type=int, default=16)
+    parser.add_argument('--num-workers', type=int, default=8)
     parser.add_argument('--n-gpu', type=int, default=1)
     parser.add_argument('--local-rank', type=int, default=0)
     parser.add_argument('--rank', type=int, default=0)
@@ -302,13 +302,13 @@ def run(fold, df, transforms_train, transforms_val, _idx, log_file):
     if args.loss == 'ce':
         criterion = nn.CrossEntropyLoss()
     elif args.loss == 'focal':
-        # weight_CE = torch.FloatTensor([1.]*args.out_dim)
-        # weight_CE[_idx]=0.25
-        # weight_CE=weight_CE.to(device)
-        criterion = FocalLoss(args.out_dim)
+        weight_CE = torch.FloatTensor([0.75]*args.out_dim)
+        weight_CE[_idx]=0.25
+        weight_CE=weight_CE.to(device)
+        criterion = FocalLoss(args.out_dim,alpha=weight_CE)
     elif args.loss == 'wce':
         weight_CE = torch.FloatTensor([1]*args.out_dim)
-        weight_CE[_idx]=20.
+        weight_CE[_idx]=30.
         weight_CE=weight_CE.to(device)
         criterion = nn.CrossEntropyLoss(weight=weight_CE).cuda()
     barrier_criterion = nn.CrossEntropyLoss()

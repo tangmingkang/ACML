@@ -12,7 +12,7 @@ df_test = pd.read_csv(os.path.join(data_dir_2020, 'test.csv'))
 df_hair = pd.read_csv(os.path.join('./hair.csv'))
 train_fold = pd.read_csv(os.path.join('./fold.csv'))
 df_train['hair']=df_hair['label'].fillna(-1).astype(int)
-hair_map={-1:0,0:0,1:1,2:1,3:1,4:1}
+hair_map={-1:0,0:0,1:1,2:2,3:3,4:4}
 df_train['hair']=df_train['hair'].map(hair_map)
 # fold = []
 # for index, row in df_train.iterrows():
@@ -72,8 +72,14 @@ diagnosis2idx = {d: idx for idx, d in enumerate(sorted(df_train.diagnosis.unique
 '''
 {'atypical melanocytic...liferation': 0, 'cafe-au-lait macule': 1, 'lentigo NOS': 2, 'lichenoid keratosis': 3, 'melanoma': 4, 'nevus': 5, 'seborrheic keratosis': 6, 'solar lentigo': 7, 'unknown': 8}
 '''
+# 二分类
+# for key in diagnosis2idx.keys():
+#     if key=='melanoma':
+#         diagnosis2idx[key]=1
+#     else:
+#         diagnosis2idx[key]=0
+print(diagnosis2idx)
 df_train['target'] = df_train['diagnosis'].map(diagnosis2idx)
-
 train_save_columns=['image_name', 'fold','hair','target' ,'sex', 'age_approx', 'n_images', 'image_size'] + [col for col in df_train.columns if col.startswith('site_')] # n_images:同一个病人的图片数量  imagesize：图片大小
 test_save_columns=['image_name','sex', 'age_approx', 'n_images', 'image_size'] + [col for col in df_train.columns if col.startswith('site_')] # n_images:同一个病人的图片数量  imagesize：图片大小
 df_train[train_save_columns].to_csv('train.csv',sep=',',index=False,header=True)
