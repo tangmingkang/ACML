@@ -1,8 +1,6 @@
 tqdm
 warmup_scheduler
 albumentations
-torch
-torchvision
 numpy
 opencv_python_headless
 geffnet
@@ -12,4 +10,5 @@ resnest
 pretrainedmodels
 Pillow
 scikit_learn
-skimage
+pandas
+opencv-python

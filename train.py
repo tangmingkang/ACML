@@ -41,11 +41,11 @@ def get_args():
     parser.add_argument('--fold-type',type=str,default='') # 将20个fold映射为五个，可选为'fold+' 'fold++' ''
     parser.add_argument('--train-fold', type=str, default='0') # train folds分别作为验证集
     parser.add_argument('--freeze-cnn', action='store_true', default=False) # 冻结CNN参数
-    parser.add_argument('--DANN', action='store_true', default=True) # 是否使用DANN毛发消除
+    parser.add_argument('--DANN', action='store_true', default=False) # 是否使用DANN毛发消除
     parser.add_argument('--n-dann-dim', default=2) # DANN class num
-    parser.add_argument('--use-meta', action='store_true', default=True) # 是否使用meta
+    parser.add_argument('--use-meta', action='store_true', default=False) # 是否使用meta
     parser.add_argument('--meta-model', type=str, default='joint', choices=['joint','adadec']) # meta模型,joint or adadec
-    parser.add_argument('--cc', action='store_true', default=True) # color constancy
+    parser.add_argument('--cc', action='store_true', default=False) # color constancy
     parser.add_argument('--cc-method', type=str, default='max_rgb') # color constancy method
     parser.add_argument('--n_meta_dim', type=str, default='512,128')
     parser.add_argument('--DEBUG', action='store_true', default=False)
@@ -59,6 +59,7 @@ def get_args():
     parser.add_argument('--rank', type=int, default=0)
     parser.add_argument('--world-size', type=int, default=0)
     parser.add_argument('--loss', type=str, default='focal', choices=['ce','focal','wce']) # ce,focal,wce
+    parser.add_argument('--wcew', type=float, default=20) # ce,focal,wce
     args, _ = parser.parse_known_args()
     return args
 
@@ -302,13 +303,13 @@ def run(fold, df, transforms_train, transforms_val, _idx, log_file):
     if args.loss == 'ce':
         criterion = nn.CrossEntropyLoss()
     elif args.loss == 'focal':
-        weight_CE = torch.FloatTensor([0.75]*args.out_dim)
-        weight_CE[_idx]=0.25
+        weight_CE = torch.FloatTensor([10]*args.out_dim)
+        weight_CE[_idx]=10
         weight_CE=weight_CE.to(device)
         criterion = FocalLoss(args.out_dim,alpha=weight_CE)
     elif args.loss == 'wce':
         weight_CE = torch.FloatTensor([1]*args.out_dim)
-        weight_CE[_idx]=30.
+        weight_CE[_idx]=args.wcew
         weight_CE=weight_CE.to(device)
         criterion = nn.CrossEntropyLoss(weight=weight_CE).cuda()
     barrier_criterion = nn.CrossEntropyLoss()
@@ -408,7 +409,11 @@ if __name__ == '__main__':
     kernel_type=args.kernel_type
     for fold in folds:
         if not kernel_type:
-            args.kernel_type=f'{args.enet_type}_size{args.image_size}_outdim{args.out_dim}_bs{args.batch_size}_{args.loss}loss'
+            if args.loss=='wce':
+                wcew=str(args.wcew)
+            else:
+                wcew=''
+            args.kernel_type=f'{args.enet_type}_size{args.image_size}_outdim{args.out_dim}_bs{args.batch_size}_{args.loss}loss{wcew}'
             if args.freeze_cnn:
                 args.kernel_type+='_freeze'
             if args.use_meta:
