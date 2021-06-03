@@ -8,12 +8,13 @@ import numpy as np
 import pandas as pd
 import pdb
 from tqdm import tqdm
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score,precision_score,recall_score,f1_score
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data.distributed import DistributedSampler
+from util.focal_loss import FocalLoss
 from util.warmup_scheduler import GradualWarmupSchedulerV2
 from dataset import get_df, get_transforms, MMDataset
 from models import Effnet, Resnest, Seresnext
@@ -25,14 +26,14 @@ def get_args():
     parser.add_argument('--label-dir', type=str, default='./datasets') # 不需要修改
     parser.add_argument('--train-data-dir', type=str, default='./datasets/images/ISIC2020/jpeg/train_1024')
     parser.add_argument('--test-data-dir', type=str, default='./datasets/images/ISIC2020/jpeg/test_1024')
-    parser.add_argument('--CUDA_VISIBLE_DEVICES', type=str, default='6')
+    parser.add_argument('--CUDA_VISIBLE_DEVICES', type=str, default='0')
     parser.add_argument('--enet-type', type=str, default='efficientnet_b3')
-    parser.add_argument('--kernel-type', type=str, default='efficientnet_b3_size512_outdim9_bs64_metaj') # 指定用于验证的模型
+    parser.add_argument('--kernel-type', type=str, default='efficientnet_b3_size512_outdim9_bs32_metaj_ccmax_rgb_DANN5') # 指定用于验证的模型
     parser.add_argument('--out-dim', type=int, default=9) # 9分类
     parser.add_argument('--image-size', type=int, default=512)  # resize后的图像大小
     parser.add_argument('--fold-type',type=str,default='') # 将20个fold映射为五个，可选为'fold+' 'fold++' ''
-    parser.add_argument('--val-fold', type=str, default='0') # val folds分别作为验证集
-    parser.add_argument('--DANN', action='store_true', default=False) # 是否使用DANN毛发消除
+    parser.add_argument('--val-fold', type=str, default='0,1,2,3,4') # val folds分别作为验证集
+    parser.add_argument('--DANN', action='store_true', default=True) # 是否使用DANN毛发消除
     parser.add_argument('--use-meta', action='store_true', default=True) # 是否使用meta
     parser.add_argument('--meta-model', type=str, default='joint') # meta模型,joint or adadec
     parser.add_argument('--cc', action='store_true', default=True) # color constancy
@@ -42,6 +43,7 @@ def get_args():
     parser.add_argument('--eval', type=str, choices=['best', 'final'], default="best")
     parser.add_argument('--batch-eval-size', type=int, default=16)
     parser.add_argument('--num-workers', type=int, default=16)
+    parser.add_argument('--focal-loss', action='store_true', default=True)
     args, _ = parser.parse_known_args()
     return args
 
@@ -77,8 +79,8 @@ def val_epoch(model, loader, mel_idx, n_test=1, get_output=False):
                     data, meta, target_class, target_barrier = data.to(device), meta.to(device), target_class.to(device), target_barrier.to(device)
                     class_logits = torch.zeros((data.shape[0], args.out_dim)).to(device)
                     class_probs = torch.zeros((data.shape[0], args.out_dim)).to(device)
-                    barrier_logits = torch.zeros((data.shape[0], 2)).to(device)
-                    barrier_probs = torch.zeros((data.shape[0], 2)).to(device)
+                    barrier_logits = torch.zeros((data.shape[0], 5)).to(device)
+                    barrier_probs = torch.zeros((data.shape[0], 5)).to(device)
                     for I in range(n_test):
                         l1,l2 = model(get_trans(data, I), meta)
                         class_logits += l1
@@ -90,8 +92,8 @@ def val_epoch(model, loader, mel_idx, n_test=1, get_output=False):
                     data, target_class, target_barrier = data.to(device), target_class.to(device), target_barrier.to(device)
                     class_logits = torch.zeros((data.shape[0], args.out_dim)).to(device)
                     class_probs = torch.zeros((data.shape[0], args.out_dim)).to(device)
-                    barrier_logits = torch.zeros((data.shape[0], 2)).to(device)
-                    barrier_probs = torch.zeros((data.shape[0], 2)).to(device)
+                    barrier_logits = torch.zeros((data.shape[0], 5)).to(device)
+                    barrier_probs = torch.zeros((data.shape[0], 5)).to(device)
                     for I in range(n_test):
                         l1,l2 = model(get_trans(data, I))
                         class_logits += l1
@@ -102,17 +104,22 @@ def val_epoch(model, loader, mel_idx, n_test=1, get_output=False):
                 barrier_logits /= n_test
                 class_probs /= n_test
                 barrier_probs /= n_test
-                CLASS_LOGITS.append(class_logits.detach().cpu())
-                CLASS_PROBS.append(class_probs.detach().cpu())
-                CLASS_TARGETS.append(target_class.detach().cpu())
-                BARRIER_LOGITS.append(barrier_logits.detach().cpu())
-                BARRIER_PROBS.append(barrier_probs.detach().cpu())
-                BARRIER_TARGETS.append(target_barrier.detach().cpu())
                 class_loss = criterion(class_logits, target_class)
                 class_val_loss.append(class_loss.detach().cpu().numpy())
                 barrier_loss = barrier_criterion(barrier_logits, target_barrier)
                 barrier_val_loss.append(barrier_loss.detach().cpu().numpy())
-                
+                class_probs=class_probs.detach().cpu()
+                class_probs=[[1.-prob[mel_idx],prob[mel_idx]] for prob in class_probs]
+                class_probs=torch.Tensor(class_probs)
+                target_class=target_class.detach().cpu()
+                target_class=[ 0 if target!=mel_idx else 1 for target in target_class]
+                target_class=torch.IntTensor(target_class)
+                CLASS_LOGITS.append(class_logits.detach().cpu())
+                CLASS_PROBS.append(class_probs)
+                CLASS_TARGETS.append(target_class)
+                BARRIER_LOGITS.append(barrier_logits.detach().cpu())
+                BARRIER_PROBS.append(barrier_probs.detach().cpu())
+                BARRIER_TARGETS.append(target_barrier.detach().cpu())
         class_val_loss = np.mean(class_val_loss)
         barrier_val_loss = np.mean(barrier_val_loss)
 
@@ -126,30 +133,49 @@ def val_epoch(model, loader, mel_idx, n_test=1, get_output=False):
         if get_output:
             return CLASS_LOGITS, CLASS_PROBS, BARRIER_LOGITS, BARRIER_PROBS
         else:
+            TP=0
+            FP=0
+            TN=0
+            FN=0
+            CLASS_PRE=CLASS_PROBS.argmax(1)
+            for i in range(len(CLASS_TARGETS)):
+                if int(CLASS_TARGETS[i])==1 and int(CLASS_PRE[i])==1:
+                    TP+=1
+                elif int(CLASS_TARGETS[i])==0 and int(CLASS_PRE[i])==0:
+                    TN+=1
+                elif int(CLASS_TARGETS[i])==1 and int(CLASS_PRE[i])==0:
+                    FN+=1
+                elif int(CLASS_TARGETS[i])==0 and int(CLASS_PRE[i])==1:
+                    FP+=1
             class_acc = (CLASS_PROBS.argmax(1) == CLASS_TARGETS).mean() * 100.
-            class_auc = roc_auc_score((CLASS_TARGETS == mel_idx).astype(float), CLASS_PROBS[:, mel_idx])
+            class_auc = roc_auc_score((CLASS_TARGETS == 1).astype(float), CLASS_PROBS[:, 1])
+            class_pre = precision_score(CLASS_TARGETS,CLASS_PROBS.argmax(1),average='binary')
+            class_rec = recall_score(CLASS_TARGETS,CLASS_PROBS.argmax(1))
+            class_f1 = f1_score(CLASS_TARGETS,CLASS_PROBS.argmax(1))
+            class_sen = TP/float(TP+FP)
+            class_spec = TN/float(TN+FP)
             barrier_acc = (BARRIER_PROBS.argmax(1) == BARRIER_TARGETS).mean() * 100.
             barrier_auc = roc_auc_score((BARRIER_TARGETS == 0).astype(float), BARRIER_PROBS[:, 0])
             class_acc_list_0=[]
             class_acc_list_1=[]
             for i in range(len(CLASS_TARGETS)):
-                if int(CLASS_TARGETS[i])!=mel_idx:
+                if int(CLASS_TARGETS[i])!=1:
                     class_acc_list_0.append(CLASS_PROBS.argmax(1)[i]==CLASS_TARGETS[i])
-                elif int(CLASS_TARGETS[i])==mel_idx:
+                elif int(CLASS_TARGETS[i])==1:
                     class_acc_list_1.append(CLASS_PROBS.argmax(1)[i]==CLASS_TARGETS[i])
             class_acc_0 = np.array(class_acc_list_0).mean() * 100.
             class_acc_1 = np.array(class_acc_list_1).mean() * 100.
-            
+
             barrier_acc_list_0=[]
             barrier_acc_list_1=[]
             for i in range(len(BARRIER_TARGETS)):
                 if int(BARRIER_TARGETS[i])==0:
                     barrier_acc_list_0.append(BARRIER_PROBS.argmax(1)[i]==BARRIER_TARGETS[i])
-                elif int(BARRIER_TARGETS[i])==1:
+                elif int(BARRIER_TARGETS[i])!=0:
                     barrier_acc_list_1.append(BARRIER_PROBS.argmax(1)[i]==BARRIER_TARGETS[i])
             barrier_acc_0 = np.array(barrier_acc_list_0).mean() * 100.
             barrier_acc_1 = np.array(barrier_acc_list_1).mean() * 100.
-            return class_val_loss, class_acc, class_auc, class_acc_0, class_acc_1, barrier_val_loss, barrier_acc, barrier_auc, barrier_acc_0, barrier_acc_1
+            return class_val_loss, class_acc, class_auc, class_acc_0, class_acc_1, class_pre, class_rec, class_f1, class_sen, class_spec, barrier_val_loss, barrier_acc, barrier_auc, barrier_acc_0, barrier_acc_1
     else:
         with torch.no_grad():
             for (data, target) in tqdm(loader):
@@ -174,11 +200,17 @@ def val_epoch(model, loader, mel_idx, n_test=1, get_output=False):
                         class_probs += l1.softmax(1)
                 class_logits /= n_test
                 class_probs /= n_test
-                CLASS_LOGITS.append(class_logits.detach().cpu())
-                CLASS_PROBS.append(class_probs.detach().cpu())
-                CLASS_TARGETS.append(target_class.detach().cpu())
                 class_loss = criterion(class_logits, target_class)
                 class_val_loss.append(class_loss.detach().cpu().numpy())
+                class_probs=class_probs.detach().cpu()
+                class_probs=[[1.-prob[mel_idx],prob[mel_idx]] for prob in class_probs]
+                class_probs=torch.Tensor(class_probs)
+                target_class=target_class.detach().cpu()
+                target_class=[ 0 if target!=mel_idx else 1 for target in target_class]
+                target_class=torch.IntTensor(target_class)
+                CLASS_LOGITS.append(class_logits.detach().cpu())
+                CLASS_PROBS.append(class_probs)
+                CLASS_TARGETS.append(target_class)
                 
         class_val_loss = np.mean(class_val_loss)
 
@@ -189,20 +221,37 @@ def val_epoch(model, loader, mel_idx, n_test=1, get_output=False):
         if get_output:
             return CLASS_LOGITS, CLASS_PROBS
         else:
+            TP=0
+            FP=0
+            TN=0
+            FN=0
+            CLASS_PRE=CLASS_PROBS.argmax(1)
+            for i in range(len(CLASS_TARGETS)):
+                if int(CLASS_TARGETS[i])==1 and int(CLASS_PRE[i])==1:
+                    TP+=1
+                elif int(CLASS_TARGETS[i])==0 and int(CLASS_PRE[i])==0:
+                    TN+=1
+                elif int(CLASS_TARGETS[i])==1 and int(CLASS_PRE[i])==0:
+                    FN+=1
+                elif int(CLASS_TARGETS[i])==0 and int(CLASS_PRE[i])==1:
+                    FP+=1
             class_acc = (CLASS_PROBS.argmax(1) == CLASS_TARGETS).mean() * 100.
-            class_auc = roc_auc_score((CLASS_TARGETS == mel_idx).astype(float), CLASS_PROBS[:, mel_idx])
+            class_auc = roc_auc_score((CLASS_TARGETS == 1).astype(float), CLASS_PROBS[:, 1])
+            class_pre = precision_score(CLASS_TARGETS,CLASS_PROBS.argmax(1),average='binary')
+            class_rec = recall_score(CLASS_TARGETS,CLASS_PROBS.argmax(1))
+            class_f1 = f1_score(CLASS_TARGETS,CLASS_PROBS.argmax(1))
+            class_sen = TN/float(TN+FN)
+            class_spec = TN/float(TN+FP)
             class_acc_list_0=[]
             class_acc_list_1=[]
             for i in range(len(CLASS_TARGETS)):
-                if int(CLASS_TARGETS[i])!=mel_idx:
+                if int(CLASS_TARGETS[i])!=1:
                     class_acc_list_0.append(CLASS_PROBS.argmax(1)[i]==CLASS_TARGETS[i])
-                elif int(CLASS_TARGETS[i])==mel_idx:
+                elif int(CLASS_TARGETS[i])==1:
                     class_acc_list_1.append(CLASS_PROBS.argmax(1)[i]==CLASS_TARGETS[i])
-                    
             class_acc_0 = np.array(class_acc_list_0).mean() * 100.
             class_acc_1 = np.array(class_acc_list_1).mean() * 100.
-            
-            return class_val_loss, class_acc, class_auc, class_acc_0, class_acc_1
+            return class_val_loss, class_acc, class_auc, class_acc_0, class_acc_1, class_pre, class_rec, class_f1, class_sen, class_spec
 
 def train_epoch(epoch, model, loader, optimizer):
     model.train()
@@ -269,7 +318,7 @@ def run(fold, df, transforms_val, _idx, log_file):
         appender.write(f'fold{fold} {args.kernel_type}\n')
     if args.DEBUG:
         args.n_epochs = 3
-        df_valid = df[df['fold'] == fold].sample(args.batch_size * 5)
+        df_valid = df[df['fold'] == fold].sample(args.batch_eval_size * 5)
     else:
         df_valid = df[df['fold'] == fold]
     dataset_valid = MMDataset(args, df_valid, 'valid', transform=transforms_val)
@@ -290,18 +339,23 @@ def run(fold, df, transforms_val, _idx, log_file):
     with open(log_file, 'a') as appender:
         appender.write(content)
     if args.DANN:
-        val_loss, acc, auc, acc_0, acc_1, barrier_val_loss, barrier_acc, barrier_auc, barrier_acc_0, barrier_acc_1= val_epoch(model, valid_loader, _idx)
-        content = time.ctime() + f'valid loss: {(val_loss):.5f}, acc: {(acc):.4f}, auc: {(auc):.6f} acc_0: {(acc_0):.6f}, acc_1: {(acc_1):.6f}.'+'\n'
+        val_loss, acc, auc, acc_0, acc_1, class_pre, class_rec, class_f1, class_sen, class_spec, barrier_val_loss, barrier_acc, barrier_auc, barrier_acc_0, barrier_acc_1= val_epoch(model, valid_loader, _idx)
+        content = time.ctime() + f'valid loss: {(val_loss):.5f}, acc: {(acc):.4f}, auc: {(auc):.6f} acc_0: {(acc_0):.6f}, acc_1: {(acc_1):.6f}, rec: {(class_rec):.6f}, pre: {(class_pre):.6f}, f1: {(class_f1):.6f}, sen: {(class_sen):.6f}, spec: {(class_spec):.6f}.'+'\n'
         content += time.ctime() + f'barrier valid loss: {(barrier_val_loss):.5f}, acc: {(barrier_acc):.4f}, auc: {(barrier_auc):.6f} acc_0: {(barrier_acc_0):.6f}, acc_1: {(barrier_acc_1):.6f}.'
         print(content)
     else:
-        val_loss, acc, auc, acc_0, acc_1= val_epoch(model, valid_loader, _idx)
-        content = time.ctime() + ' ' + f'valid loss: {(val_loss):.5f}, acc: {(acc):.4f}, auc: {(auc):.6f} acc_0: {(acc_0):.6f}, acc_1: {(acc_1):.6f}.'
+        val_loss, acc, auc, acc_0, acc_1, class_pre, class_rec, class_f1, class_sen, class_spec= val_epoch(model, valid_loader, _idx)
+        content = time.ctime() + f'valid loss: {(val_loss):.5f}, acc: {(acc):.4f}, auc: {(auc):.6f} acc_0: {(acc_0):.6f}, acc_1: {(acc_1):.6f}, rec: {(class_rec):.6f}, pre: {(class_pre):.6f}, f1: {(class_f1):.6f}, sen: {(class_sen):.6f}, spec: {(class_spec):.6f}.'+'\n'
         print(content)
     with open(log_file, 'a') as appender:
         appender.write(content + '\n')
     ACC.append(acc)
     AUC.append(auc)
+    PRE.append(class_pre)
+    REC.append(class_rec)
+    F1.append(class_f1)
+    SEN.append(class_sen)
+    SPEC.append(class_spec)
     ACC_0.append(acc_0)
     ACC_1.append(acc_1)
 
@@ -318,6 +372,11 @@ if __name__ == '__main__':
     AUC=[]
     ACC_0=[]
     ACC_1=[]
+    PRE=[]
+    REC=[]
+    F1=[]
+    SEN=[]
+    SPEC=[]
     args = get_args()
     os.environ['CUDA_VISIBLE_DEVICES'] = args.CUDA_VISIBLE_DEVICES
 
@@ -332,8 +391,10 @@ if __name__ == '__main__':
 
     device = torch.device("cuda")
     set_seed()
-
-    criterion = nn.CrossEntropyLoss()
+    if args.focal_loss:
+        criterion = FocalLoss(args.out_dim)
+    else:
+        criterion = nn.CrossEntropyLoss()
     if args.DANN:
         barrier_criterion = nn.CrossEntropyLoss()
     
@@ -353,5 +414,6 @@ if __name__ == '__main__':
 
     with open(log_file, 'a') as appender:
         appender.write(f'all folds {args.val_fold} {kernel_type}\n')
-        content = f'mean acc: {(np.mean(ACC)):.4f}, mean auc: {(np.mean(AUC)):.6f} mean acc_0: {(np.mean(ACC_0)):.6f}, mean acc_1: {(np.mean(ACC_1)):.6f}.'
+        content = f'acc: {(np.mean(ACC)):.4f}, auc: {(np.mean(AUC)):.6f} acc_0: {(np.mean(ACC_0)):.6f}, acc_1: {(np.mean(ACC_1)):.6f}, SEN: {(np.mean(SEN)):.6f}, SPEC: {(np.mean(SPEC)):.6f}, PRE: {(np.mean(PRE)):.6f}, REC: {(np.mean(REC)):.6f}, F1: {(np.mean(F1)):.6f}.\n'
+        content += f'acc: {(np.std(ACC)):.4f}, auc: {(np.std(AUC)):.6f} acc_0: {(np.std(ACC_0)):.6f}, acc_1: {(np.std(ACC_1)):.6f}, SEN: {(np.std(SEN)):.6f}, SPEC: {(np.std(SPEC)):.6f}, PRE: {(np.std(PRE)):.6f}, REC: {(np.std(REC)):.6f}, F1: {(np.std(F1)):.6f}.'
         appender.write(content + '\n')

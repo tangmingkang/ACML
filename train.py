@@ -4,6 +4,7 @@ import time
 import random
 import argparse
 import json
+from util.focal_loss import FocalLoss
 import numpy as np
 import pandas as pd
 import pdb
@@ -32,8 +33,8 @@ def get_args():
     parser.add_argument('--train-data-dir', type=str, default='./datasets/images/ISIC2020/jpeg/train_1024')
     parser.add_argument('--test-data-dir', type=str, default='./datasets/images/ISIC2020/jpeg/test_1024')
     parser.add_argument('--lock-file', type=str, default='lock.txt')
-    parser.add_argument('--CUDA_VISIBLE_DEVICES', type=str, default='0,1,2,4')
-    parser.add_argument('--enet-type', type=str, default='efficientnet_b7')
+    parser.add_argument('--CUDA_VISIBLE_DEVICES', type=str, default='0,1,2,3')
+    parser.add_argument('--enet-type', type=str, default='tf_efficientnet_b5_ns')
     parser.add_argument('--kernel-type', type=str, default='') # 模型保存名字，不指定则使用默认名称，不需要修改
     parser.add_argument('--out-dim', type=int, default=9) # 9分类
     parser.add_argument('--image-size', type=int, default=512)  # resize后的图像大小
@@ -41,21 +42,23 @@ def get_args():
     parser.add_argument('--train-fold', type=str, default='0') # train folds分别作为验证集
     parser.add_argument('--freeze-cnn', action='store_true', default=False) # 冻结CNN参数
     parser.add_argument('--DANN', action='store_true', default=True) # 是否使用DANN毛发消除
+    parser.add_argument('--n-dann-dim', default=2) # DANN class num
     parser.add_argument('--use-meta', action='store_true', default=True) # 是否使用meta
-    parser.add_argument('--meta-model', type=str, default='joint') # meta模型,joint or adadec
+    parser.add_argument('--meta-model', type=str, default='joint', choices=['joint','adadec']) # meta模型,joint or adadec
     parser.add_argument('--cc', action='store_true', default=True) # color constancy
     parser.add_argument('--cc-method', type=str, default='max_rgb') # color constancy method
     parser.add_argument('--n_meta_dim', type=str, default='512,128')
     parser.add_argument('--DEBUG', action='store_true', default=False)
-    parser.add_argument('--batch-size', type=int, default=64)
-    parser.add_argument('--batch-eval-size', type=int, default=16)
+    parser.add_argument('--batch-size', type=int, default=8)
+    parser.add_argument('--batch-eval-size', type=int, default=4)
     parser.add_argument('--init-lr', type=float, default=3e-5)
-    parser.add_argument('--n-epochs', type=int, default=15)
-    parser.add_argument('--num-workers', type=int, default=8)
+    parser.add_argument('--n-epochs', type=int, default=20)
+    parser.add_argument('--num-workers', type=int, default=16)
     parser.add_argument('--n-gpu', type=int, default=1)
     parser.add_argument('--local-rank', type=int, default=0)
     parser.add_argument('--rank', type=int, default=0)
     parser.add_argument('--world-size', type=int, default=0)
+    parser.add_argument('--loss', type=str, default='focal', choices=['ce','focal','wce']) # ce,focal,wce
     args, _ = parser.parse_known_args()
     return args
 
@@ -92,8 +95,8 @@ def val_epoch(model, loader, mel_idx, criterion, barrier_criterion, device, n_te
                     data, meta, target_class, target_barrier = data.to(device), meta.to(device), target_class.to(device), target_barrier.to(device)
                     class_logits = torch.zeros((data.shape[0], args.out_dim)).to(device)
                     class_probs = torch.zeros((data.shape[0], args.out_dim)).to(device)
-                    barrier_logits = torch.zeros((data.shape[0], 2)).to(device)
-                    barrier_probs = torch.zeros((data.shape[0], 2)).to(device)
+                    barrier_logits = torch.zeros((data.shape[0], args.n_dann_dim)).to(device)
+                    barrier_probs = torch.zeros((data.shape[0], args.n_dann_dim)).to(device)
                     for I in range(n_test):
                         l1,l2 = model(get_trans(data, I), meta)
                         class_logits += l1
@@ -105,8 +108,8 @@ def val_epoch(model, loader, mel_idx, criterion, barrier_criterion, device, n_te
                     data, target_class, target_barrier = data.to(device), target_class.to(device), target_barrier.to(device)
                     class_logits = torch.zeros((data.shape[0], args.out_dim)).to(device)
                     class_probs = torch.zeros((data.shape[0], args.out_dim)).to(device)
-                    barrier_logits = torch.zeros((data.shape[0], 2)).to(device)
-                    barrier_probs = torch.zeros((data.shape[0], 2)).to(device)
+                    barrier_logits = torch.zeros((data.shape[0], args.n_dann_dim)).to(device)
+                    barrier_probs = torch.zeros((data.shape[0], args.n_dann_dim)).to(device)
                     for I in range(n_test):
                         l1,l2 = model(get_trans(data, I))
                         class_logits += l1
@@ -160,7 +163,7 @@ def val_epoch(model, loader, mel_idx, criterion, barrier_criterion, device, n_te
             for i in range(len(BARRIER_TARGETS)):
                 if int(BARRIER_TARGETS[i])==0:
                     barrier_acc_list_0.append(BARRIER_PROBS.argmax(1)[i]==BARRIER_TARGETS[i])
-                elif int(BARRIER_TARGETS[i])==1:
+                elif int(BARRIER_TARGETS[i])!=0:
                     barrier_acc_list_1.append(BARRIER_PROBS.argmax(1)[i]==BARRIER_TARGETS[i])
             barrier_acc_0 = np.array(barrier_acc_list_0).mean() * 100.
             barrier_acc_1 = np.array(barrier_acc_list_1).mean() * 100.
@@ -296,7 +299,18 @@ def run(fold, df, transforms_train, transforms_val, _idx, log_file):
 
     device = torch.device("cuda", args.local_rank)
     print(f'device: {device} n_gpu: {args.n_gpu}')
-    criterion = nn.CrossEntropyLoss()
+    if args.loss == 'ce':
+        criterion = nn.CrossEntropyLoss()
+    elif args.loss == 'focal':
+        # weight_CE = torch.FloatTensor([1.]*args.out_dim)
+        # weight_CE[_idx]=0.25
+        # weight_CE=weight_CE.to(device)
+        criterion = FocalLoss(args.out_dim)
+    elif args.loss == 'wce':
+        weight_CE = torch.FloatTensor([1]*args.out_dim)
+        weight_CE[_idx]=20.
+        weight_CE=weight_CE.to(device)
+        criterion = nn.CrossEntropyLoss(weight=weight_CE).cuda()
     barrier_criterion = nn.CrossEntropyLoss()
     
     dataset_train = MMDataset(args, df_train, 'train', transform=transforms_train)
@@ -394,7 +408,7 @@ if __name__ == '__main__':
     kernel_type=args.kernel_type
     for fold in folds:
         if not kernel_type:
-            args.kernel_type=f'{args.enet_type}_size{args.image_size}_outdim{args.out_dim}_bs{args.batch_size}'
+            args.kernel_type=f'{args.enet_type}_size{args.image_size}_outdim{args.out_dim}_bs{args.batch_size}_{args.loss}loss'
             if args.freeze_cnn:
                 args.kernel_type+='_freeze'
             if args.use_meta:
@@ -406,7 +420,7 @@ if __name__ == '__main__':
             if args.cc:
                 args.kernel_type+='_cc'+args.cc_method
             if args.DANN:
-                args.kernel_type+='_DANN'
+                args.kernel_type+='_DANN'+str(args.n_dann_dim)
         else:
             args.kernel_type=kernel_type
         args.kernel_type+=f'_{args.fold_type}{fold}'

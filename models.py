@@ -71,7 +71,7 @@ class Effnet(nn.Module):
                 nn.Linear(self.enet.classifier.in_features,100),
                 nn.BatchNorm1d(100),
                 nn.ReLU(True),
-                nn.Linear(100, 2)
+                nn.Linear(100, args.n_dann_dim)
             )    
         self.myfc = nn.Linear(in_ch, args.out_dim)
         self.enet.classifier = nn.Identity()
