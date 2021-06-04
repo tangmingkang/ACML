@@ -54,7 +54,7 @@ class Effnet(nn.Module):
         in_ch = self.enet.classifier.in_features
         if args.use_meta:
             self.meta = nn.Sequential(
-                nn.Linear(10, self.n_meta_dim[0]),
+                nn.Linear(8, self.n_meta_dim[0]),
                 nn.BatchNorm1d(self.n_meta_dim[0]),
                 Swish_Module(),
                 nn.Dropout(p=0.3),

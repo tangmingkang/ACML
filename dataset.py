@@ -15,8 +15,12 @@ class MMDataset(Dataset):
         self.use_meta = args.use_meta
         self.DANN = args.DANN
         self.transform = transform
+        if args.out_dim==2:
+            self.mel=1
+        elif args.out_dim==9:
+            self.mel=4
         self.num=0
-        self.meta_columns=['age_approx', 'n_images', 'image_size'] + [col for col in csv.columns if col.startswith('site_')]
+        self.meta_columns=['age_approx'] + [col for col in csv.columns if col.startswith('site_')]
         self.cc = args.cc
         cc_methods={
             'max_rgb':max_rgb
@@ -26,8 +30,8 @@ class MMDataset(Dataset):
         return self.csv.shape[0]
     
     def get_num(self):
-        num_mm=self.csv.loc[(self.csv['target'] == 4)].shape[0]
-        num_normal=self.csv.loc[(self.csv['target'] != 4)].shape[0]
+        num_mm=self.csv.loc[(self.csv['target'] == self.mel)].shape[0]
+        num_normal=self.csv.loc[(self.csv['target'] != self.mel)].shape[0]
         num_hair=self.csv.loc[(self.csv['hair'] == 1)].shape[0]
         num_unhair=self.csv.loc[(self.csv['hair'] == 0)].shape[0]
         return num_normal, num_mm, num_hair, num_unhair

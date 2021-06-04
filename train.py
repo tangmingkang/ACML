@@ -9,7 +9,8 @@ import numpy as np
 import pandas as pd
 import pdb
 from tqdm import tqdm
-from sklearn.metrics import roc_auc_score
+import sklearn
+from sklearn.metrics import roc_auc_score,precision_score,recall_score,f1_score
 from sklearn.model_selection import StratifiedKFold
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -34,7 +35,7 @@ def get_args():
     parser.add_argument('--test-data-dir', type=str, default='./datasets/images/ISIC2020/jpeg/test_1024')
     parser.add_argument('--lock-file', type=str, default='lock.txt')
     parser.add_argument('--CUDA_VISIBLE_DEVICES', type=str, default='0,1,2,3')
-    parser.add_argument('--enet-type', type=str, default='tf_efficientnet_b5_ns')
+    parser.add_argument('--enet-type', type=str, default='efficientnet_b3')
     parser.add_argument('--kernel-type', type=str, default='') # 模型保存名字，不指定则使用默认名称，不需要修改
     parser.add_argument('--out-dim', type=int, default=2) # 9分类
     parser.add_argument('--image-size', type=int, default=512)  # resize后的图像大小
@@ -58,7 +59,7 @@ def get_args():
     parser.add_argument('--local-rank', type=int, default=0)
     parser.add_argument('--rank', type=int, default=0)
     parser.add_argument('--world-size', type=int, default=0)
-    parser.add_argument('--loss', type=str, default='focal', choices=['ce','focal','wce']) # ce,focal,wce
+    parser.add_argument('--loss', type=str, default='ce', choices=['ce','focal','wce']) # ce,focal,wce
     parser.add_argument('--wcew', type=float, default=20) # ce,focal,wce
     args, _ = parser.parse_known_args()
     return args
@@ -76,6 +77,34 @@ def get_trans(img, I):
     elif I % 4 == 3:
         return img.flip(2).flip(3)
 
+def get_metrics(y, score):
+    fpr, tpr, thresholds = sklearn.metrics.roc_curve(y, score)
+    auc = sklearn.metrics.auc(fpr, tpr)
+    optimal_idx = np.argmax(tpr - fpr)
+    optimal_th = thresholds[optimal_idx]
+    tp = 0
+    tn = 0
+    fp = 0
+    fn = 0
+    predict_labels = [1 if _score >= optimal_th else 0 for _score in score]
+    for idx in range(len(predict_labels)):
+        predict_label = predict_labels[idx]
+        ture_label = y[idx]
+        if ture_label == 1 and predict_label == 1:
+            tp += 1
+        if ture_label == 1 and predict_label == 0:
+            fn += 1
+        if ture_label == 0 and predict_label == 0:
+            tn += 1
+        if ture_label == 0 and predict_label == 1:
+            fp += 1
+    acc = (tp+tn)/(tp+tn+fp+fn)
+    sen = tp/(tp+fn)
+    spec = tn/(tn+fp)
+    pre = tp/(tp+fp)
+    rec = tp/(tp+fn)
+    f1=2*pre*rec/(pre+rec)
+    return auc,acc,sen,spec,pre,rec,f1
 
 def val_epoch(model, loader, mel_idx, criterion, barrier_criterion, device, n_test=1, get_output=False):
     model.eval()
@@ -145,30 +174,13 @@ def val_epoch(model, loader, mel_idx, criterion, barrier_criterion, device, n_te
         if get_output:
             return CLASS_LOGITS, CLASS_PROBS, BARRIER_LOGITS, BARRIER_PROBS
         else:
-            class_acc = (CLASS_PROBS.argmax(1) == CLASS_TARGETS).mean() * 100.
-            class_auc = roc_auc_score((CLASS_TARGETS == mel_idx).astype(float), CLASS_PROBS[:, mel_idx])
-            barrier_acc = (BARRIER_PROBS.argmax(1) == BARRIER_TARGETS).mean() * 100.
-            barrier_auc = roc_auc_score((BARRIER_TARGETS == 0).astype(float), BARRIER_PROBS[:, 0])
-            class_acc_list_0=[]
-            class_acc_list_1=[]
-            for i in range(len(CLASS_TARGETS)):
-                if int(CLASS_TARGETS[i])!=mel_idx:
-                    class_acc_list_0.append(CLASS_PROBS.argmax(1)[i]==CLASS_TARGETS[i])
-                elif int(CLASS_TARGETS[i])==mel_idx:
-                    class_acc_list_1.append(CLASS_PROBS.argmax(1)[i]==CLASS_TARGETS[i])
-            class_acc_0 = np.array(class_acc_list_0).mean() * 100.
-            class_acc_1 = np.array(class_acc_list_1).mean() * 100.
-            
-            barrier_acc_list_0=[]
-            barrier_acc_list_1=[]
-            for i in range(len(BARRIER_TARGETS)):
-                if int(BARRIER_TARGETS[i])==0:
-                    barrier_acc_list_0.append(BARRIER_PROBS.argmax(1)[i]==BARRIER_TARGETS[i])
-                elif int(BARRIER_TARGETS[i])!=0:
-                    barrier_acc_list_1.append(BARRIER_PROBS.argmax(1)[i]==BARRIER_TARGETS[i])
-            barrier_acc_0 = np.array(barrier_acc_list_0).mean() * 100.
-            barrier_acc_1 = np.array(barrier_acc_list_1).mean() * 100.
-            return class_val_loss, class_acc, class_auc, class_acc_0, class_acc_1, barrier_val_loss, barrier_acc, barrier_auc, barrier_acc_0, barrier_acc_1
+            class_auc,class_acc,class_sen,class_spec,class_pre,class_rec,class_f1=get_metrics((CLASS_TARGETS == 1).astype(float), CLASS_PROBS[:, 1])
+            barrier_auc,barrier_acc,barrier_sen,barrier_spec,barrier_pre,barrier_rec,barrier_f1=get_metrics((BARRIER_TARGETS == 1).astype(float), BARRIER_PROBS[:, 1])
+            class_acc_0=class_spec
+            class_acc_1=class_sen
+            barrier_acc_0=barrier_spec
+            barrier_acc_1=barrier_sen
+            return class_val_loss, class_acc, class_auc, class_acc_0, class_acc_1, class_pre, class_rec, class_f1, class_sen, class_spec, barrier_val_loss, barrier_acc, barrier_auc, barrier_acc_0, barrier_acc_1
     else:
         with torch.no_grad():
             for (data, target) in tqdm(loader):
@@ -208,20 +220,10 @@ def val_epoch(model, loader, mel_idx, criterion, barrier_criterion, device, n_te
         if get_output:
             return CLASS_LOGITS, CLASS_PROBS
         else:
-            class_acc = (CLASS_PROBS.argmax(1) == CLASS_TARGETS).mean() * 100.
-            class_auc = roc_auc_score((CLASS_TARGETS == mel_idx).astype(float), CLASS_PROBS[:, mel_idx])
-            class_acc_list_0=[]
-            class_acc_list_1=[]
-            for i in range(len(CLASS_TARGETS)):
-                if int(CLASS_TARGETS[i])!=mel_idx:
-                    class_acc_list_0.append(CLASS_PROBS.argmax(1)[i]==CLASS_TARGETS[i])
-                elif int(CLASS_TARGETS[i])==mel_idx:
-                    class_acc_list_1.append(CLASS_PROBS.argmax(1)[i]==CLASS_TARGETS[i])
-                    
-            class_acc_0 = np.array(class_acc_list_0).mean() * 100.
-            class_acc_1 = np.array(class_acc_list_1).mean() * 100.
-            
-            return class_val_loss, class_acc, class_auc, class_acc_0, class_acc_1
+            class_auc,class_acc,class_sen,class_spec,class_pre,class_rec,class_f1=get_metrics((CLASS_TARGETS == 1).astype(float), CLASS_PROBS[:, 1])
+            class_acc_0=class_spec
+            class_acc_1=class_sen
+            return class_val_loss, class_acc, class_auc, class_acc_0, class_acc_1, class_pre, class_rec, class_f1, class_sen, class_spec
 
 def train_epoch(epoch, model, loader, optimizer,  criterion, barrier_criterion, device):
     model.train()
@@ -351,15 +353,16 @@ def run(fold, df, transforms_train, transforms_val, _idx, log_file):
         if args.local_rank==0:
             print(time.ctime(), f'Epoch {epoch}')
         train_loss, barrier_train_loss = train_epoch(epoch, model, train_loader, optimizer, criterion, barrier_criterion, device)
+
         if args.local_rank==0:
             if args.DANN:
-                val_loss, acc, auc, acc_0, acc_1, barrier_val_loss, barrier_acc, barrier_auc, barrier_acc_0, barrier_acc_1= val_epoch(model, valid_loader, _idx, criterion, barrier_criterion, device)
-                content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, train loss: {train_loss:.5f}, valid loss: {(val_loss):.5f}, acc: {(acc):.4f}, auc: {(auc):.6f} acc_0: {(acc_0):.6f}, acc_1: {(acc_1):.6f}.'+'\n'
-                content += time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, barrier train loss: {barrier_train_loss:.5f}, barrier valid loss: {(barrier_val_loss):.5f}, acc: {(barrier_acc):.4f}, auc: {(barrier_auc):.6f} acc_0: {(barrier_acc_0):.6f}, acc_1: {(barrier_acc_1):.6f}.'
+                val_loss, acc, auc, acc_0, acc_1, class_pre, class_rec, class_f1, class_sen, class_spec, barrier_val_loss, barrier_acc, barrier_auc, barrier_acc_0, barrier_acc_1= val_epoch(model, valid_loader, _idx, criterion, barrier_criterion, device)
+                content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, train loss: {train_loss:.5f}, valid loss: {(val_loss):.5f}, acc: {(acc):.4f}, auc: {(auc):.6f} spec: {(class_spec):.6f}, sen: {(class_sen):.6f}.'+'\n'
+                content += time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, barrier train loss: {barrier_train_loss:.5f}, barrier valid loss: {(barrier_val_loss):.5f}, acc: {(barrier_acc):.4f}, auc: {(barrier_auc):.6f} spec: {(barrier_acc_0):.6f}, sen: {(barrier_acc_1):.6f}.'
                 print(content)
             else:
-                val_loss, acc, auc, acc_0, acc_1= val_epoch(model, valid_loader, _idx, criterion, barrier_criterion, device)
-                content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, train loss: {train_loss:.5f}, valid loss: {(val_loss):.5f}, acc: {(acc):.4f}, auc: {(auc):.6f} acc_0: {(acc_0):.6f}, acc_1: {(acc_1):.6f}.'
+                val_loss, acc, auc, acc_0, acc_1, class_pre, class_rec, class_f1, class_sen, class_spec= val_epoch(model, valid_loader, _idx, criterion, barrier_criterion, device)
+                content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, train loss: {train_loss:.5f}, valid loss: {(val_loss):.5f}, acc: {(acc):.4f}, auc: {(auc):.6f} spec: {(class_spec):.6f}, sen: {(class_sen):.6f}.'
                 print(content)
             with open(log_file, 'a') as appender:
                 appender.write(content + '\n')
