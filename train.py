@@ -34,8 +34,8 @@ def get_args():
     parser.add_argument('--train-data-dir', type=str, default='./datasets/images/ISIC2020/jpeg/train_1024')
     parser.add_argument('--test-data-dir', type=str, default='./datasets/images/ISIC2020/jpeg/test_1024')
     parser.add_argument('--lock-file', type=str, default='lock.txt')
-    parser.add_argument('--CUDA_VISIBLE_DEVICES', type=str, default='0,1,2,3')
-    parser.add_argument('--enet-type', type=str, default='efficientnet_b3')
+    parser.add_argument('--CUDA_VISIBLE_DEVICES', type=str, default='0,1,2,3,4,5,6')
+    parser.add_argument('--enet-type', type=str, default='tf_efficientnet_b5_ns')
     parser.add_argument('--kernel-type', type=str, default='') # 模型保存名字，不指定则使用默认名称，不需要修改
     parser.add_argument('--out-dim', type=int, default=2) # 9分类
     parser.add_argument('--image-size', type=int, default=512)  # resize后的图像大小
@@ -59,7 +59,7 @@ def get_args():
     parser.add_argument('--local-rank', type=int, default=0)
     parser.add_argument('--rank', type=int, default=0)
     parser.add_argument('--world-size', type=int, default=0)
-    parser.add_argument('--loss', type=str, default='ce', choices=['ce','focal','wce']) # ce,focal,wce
+    parser.add_argument('--loss', type=str, default='focal', choices=['ce','focal','wce']) # ce,focal,wce
     parser.add_argument('--wcew', type=float, default=20) # ce,focal,wce
     args, _ = parser.parse_known_args()
     return args
@@ -305,9 +305,10 @@ def run(fold, df, transforms_train, transforms_val, _idx, log_file):
     if args.loss == 'ce':
         criterion = nn.CrossEntropyLoss()
     elif args.loss == 'focal':
-        weight_CE = torch.FloatTensor([10]*args.out_dim)
-        weight_CE[_idx]=10
-        weight_CE=weight_CE.to(device)
+        weight_CE = None
+        # weight_CE = torch.FloatTensor([0.75]*args.out_dim)
+        # weight_CE[_idx]=0.25
+        # weight_CE=weight_CE.to(device)
         criterion = FocalLoss(args.out_dim,alpha=weight_CE)
     elif args.loss == 'wce':
         weight_CE = torch.FloatTensor([1]*args.out_dim)
@@ -329,8 +330,14 @@ def run(fold, df, transforms_train, transforms_val, _idx, log_file):
     # model = model.to(device)
 
     auc_max = 0.
+    sen_max = 0.
+    spec_max = 0.
+    acc_max = 0.
     
-    model_file_best  = os.path.join(args.model_dir, f'{args.kernel_type}_best.pth')
+    model_file_auc  = os.path.join(args.model_dir, f'{args.kernel_type}_auc.pth')
+    model_file_sen  = os.path.join(args.model_dir, f'{args.kernel_type}_sen.pth')
+    model_file_spec  = os.path.join(args.model_dir, f'{args.kernel_type}_spec.pth')
+    model_file_acc  = os.path.join(args.model_dir, f'{args.kernel_type}_acc.pth')
     model_file_final = os.path.join(args.model_dir, f'{args.kernel_type}_final.pth')
     if args.freeze_cnn:
         optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.init_lr)
@@ -364,12 +371,24 @@ def run(fold, df, transforms_train, transforms_val, _idx, log_file):
                 val_loss, acc, auc, acc_0, acc_1, class_pre, class_rec, class_f1, class_sen, class_spec= val_epoch(model, valid_loader, _idx, criterion, barrier_criterion, device)
                 content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, train loss: {train_loss:.5f}, valid loss: {(val_loss):.5f}, acc: {(acc):.4f}, auc: {(auc):.6f} spec: {(class_spec):.6f}, sen: {(class_sen):.6f}.'
                 print(content)
+            if auc > auc_max:
+                content+='auc_max ({:.6f} --> {:.6f}). Saving model ...\n'.format(auc_max, auc)
+                torch.save(model.module.state_dict(), model_file_auc)
+                auc_max = auc
+            if acc > acc_max:
+                content+='acc_max ({:.6f} --> {:.6f}). Saving model ...\n'.format(acc_max, acc)
+                torch.save(model.module.state_dict(), model_file_acc)
+                acc_max = acc
+            if class_sen > sen_max:
+                content+='sen_max ({:.6f} --> {:.6f}). Saving model ...\n'.format(sen_max, class_sen)
+                torch.save(model.module.state_dict(), model_file_sen)
+                sen_max = class_sen 
+            if class_spec > spec_max:
+                content+='spec_max ({:.6f} --> {:.6f}). Saving model ...\n'.format(spec_max, class_spec)
+                torch.save(model.module.state_dict(), model_file_spec)
+                spec_max = class_spec
             with open(log_file, 'a') as appender:
                 appender.write(content + '\n')
-            if auc > auc_max:
-                print('auc_max ({:.6f} --> {:.6f}). Saving model ...'.format(auc_max, auc))
-                torch.save(model.module.state_dict(), model_file_best)
-                auc_max = auc
 
         scheduler_warmup.step()
         if epoch == 2: scheduler_warmup.step()  # bug workaround

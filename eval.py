@@ -28,12 +28,12 @@ def get_args():
     parser.add_argument('--train-data-dir', type=str, default='./datasets/images/ISIC2020/jpeg/train_1024')
     parser.add_argument('--test-data-dir', type=str, default='./datasets/images/ISIC2020/jpeg/test_1024')
     parser.add_argument('--CUDA_VISIBLE_DEVICES', type=str, default='0')
-    parser.add_argument('--enet-type', type=str, default='tf_efficientnet_b5_ns')
-    parser.add_argument('--kernel-type', type=str, default='tf_efficientnet_b5_ns_size512_outdim2_bs32_wceloss25.0') # 指定用于验证的模型
+    parser.add_argument('--enet-type', type=str, default='tf_efficientnet_b3_ns')
+    parser.add_argument('--kernel-type', type=str, default='tf_efficientnet_b3_ns_size512_outdim2_bs32_celoss') # 指定用于验证的模型
     parser.add_argument('--out-dim', type=int, default=2) # 9分类
     parser.add_argument('--image-size', type=int, default=512)  # resize后的图像大小
     parser.add_argument('--fold-type',type=str,default='') # 将20个fold映射为五个，可选为'fold+' 'fold++' ''
-    parser.add_argument('--val-fold', type=str, default='0,1') # val folds分别作为验证集
+    parser.add_argument('--val-fold', type=str, default='0,1,2') # val folds分别作为验证集
     parser.add_argument('--DANN', action='store_true', default=False) # 是否使用DANN毛发消除
     parser.add_argument('--n-dann-dim', default=2) # DANN class num
     parser.add_argument('--use-meta', action='store_true', default=False) # 是否使用meta
@@ -45,7 +45,7 @@ def get_args():
     parser.add_argument('--eval', type=str, choices=['best', 'final'], default="best")
     parser.add_argument('--batch-eval-size', type=int, default=16)
     parser.add_argument('--num-workers', type=int, default=16)
-    parser.add_argument('--loss', type=str, default='wce', choices=['ce','focal','wce']) # ce,focal,wce
+    parser.add_argument('--loss', type=str, default='ce', choices=['ce','focal','wce']) # ce,focal,wce
     parser.add_argument('--wcew', type=float, default=25) # ce,focal,wce
     args, _ = parser.parse_known_args()
     return args
