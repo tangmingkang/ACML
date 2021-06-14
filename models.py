@@ -54,7 +54,7 @@ class Effnet(nn.Module):
         in_ch = self.enet.classifier.in_features
         if args.use_meta:
             self.meta = nn.Sequential(
-                nn.Linear(8, self.n_meta_dim[0]),
+                nn.Linear(10, self.n_meta_dim[0]),
                 nn.BatchNorm1d(self.n_meta_dim[0]),
                 Swish_Module(),
                 nn.Dropout(p=0.3),
@@ -105,6 +105,53 @@ class Effnet(nn.Module):
         else:
             return out 
 
+
+class B6_bsline(nn.Module):
+    def __init__(self, args, pretrained=True):
+        super(B6_bsline, self).__init__()
+        self.enet = geffnet.create_model('tf_efficientnet_b6_ns', pretrained=pretrained)
+        in_ch = self.enet.classifier.in_features
+        self.myfc = nn.Sequential(
+            nn.Linear(in_ch, args.out_dim),
+            
+            nn.Linear(10, self.n_meta_dim[0]),
+            nn.BatchNorm1d(self.n_meta_dim[0]),
+            Swish_Module(),
+            nn.Linear(self.n_meta_dim[0], self.n_meta_dim[1]),
+            nn.BatchNorm1d(self.n_meta_dim[1]),
+            Swish_Module(),
+        )
+        # self.myfc = nn.Linear(in_ch, args.out_dim)
+        self.enet.classifier = nn.Identity()
+
+    def extract(self, x):
+        x = self.enet(x)
+        return x
+
+    def forward(self, x, x_meta=None, alpha=0, test=False):
+        x = self.extract(x).squeeze(-1).squeeze(-1)
+        if self.DANN and not test:
+            barrier_x = ReverseLayerF.apply(x,alpha)
+            barrier_out = self.barrier_classifier(barrier_x)
+        if self.use_meta:
+            x_meta = self.meta(x_meta)
+            if self.meta_model=='joint':
+                x = torch.cat((x, x_meta), dim=1)
+            elif self.meta_model=='adadec':
+                att = self.attention(x_meta) # bs*n_meta_dim[1] -> bs*in_ch
+                lamb_att = torch.diag_embed(att) # bs*in_ch*in_ch
+                x = x.unsqueeze(1) # bs,1,in_ch
+                x = x.bmm(lamb_att).squeeze(1)
+        for i, dropout in enumerate(self.dropouts):
+            if i == 0:
+                out = self.myfc(dropout(x))
+            else:
+                out += self.myfc(dropout(x))
+        out /= len(self.dropouts)
+        if self.DANN and not test:
+            return out,barrier_out
+        else:
+            return out 
 
 
 class Resnest(nn.Module):

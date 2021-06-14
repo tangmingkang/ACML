@@ -4,6 +4,7 @@
 /subs/*
 /visualization/*
 /weights/*
+melanoma
 .*
 !.gitignore
 # Byte-compiled / optimized / DLL files

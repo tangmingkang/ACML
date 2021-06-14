@@ -28,25 +28,27 @@ def get_args():
     parser.add_argument('--train-data-dir', type=str, default='./datasets/images/ISIC2020/jpeg/train_1024')
     parser.add_argument('--test-data-dir', type=str, default='./datasets/images/ISIC2020/jpeg/test_1024')
     parser.add_argument('--CUDA_VISIBLE_DEVICES', type=str, default='0')
-    parser.add_argument('--enet-type', type=str, default='tf_efficientnet_b3_ns')
-    parser.add_argument('--kernel-type', type=str, default='tf_efficientnet_b3_ns_size512_outdim2_bs32_celoss') # 指定用于验证的模型
-    parser.add_argument('--out-dim', type=int, default=2) # 9分类
+    parser.add_argument('--enet-type', type=str, default='efficientnet_b3')
+    parser.add_argument('--kernel-type', type=str, default='efficientnet_b3_size512_outdim9_bs64_celoss_metaj_ccmax_rgb_DANN2_fakedata') # 指定用于验证的模型
+    parser.add_argument('--out-dim', type=int, default=9) # 9分类
     parser.add_argument('--image-size', type=int, default=512)  # resize后的图像大小
     parser.add_argument('--fold-type',type=str,default='') # 将20个fold映射为五个，可选为'fold+' 'fold++' ''
-    parser.add_argument('--val-fold', type=str, default='0,1,2') # val folds分别作为验证集
-    parser.add_argument('--DANN', action='store_true', default=False) # 是否使用DANN毛发消除
+    parser.add_argument('--val-fold', type=str, default='0,1,2,3,4') # val folds分别作为验证集
+    parser.add_argument('--DANN', action='store_true', default=True) # 是否使用DANN毛发消除
     parser.add_argument('--n-dann-dim', default=2) # DANN class num
-    parser.add_argument('--use-meta', action='store_true', default=False) # 是否使用meta
+    parser.add_argument('--use-meta', action='store_true', default=True) # 是否使用meta
     parser.add_argument('--meta-model', type=str, default='joint') # meta模型,joint or adadec
-    parser.add_argument('--cc', action='store_true', default=False) # color constancy
+    parser.add_argument('--cc', action='store_true', default=True) # color constancy
     parser.add_argument('--cc-method', type=str, default='max_rgb') # color constancy method
     parser.add_argument('--n_meta_dim', type=str, default='512,128')
     parser.add_argument('--DEBUG', action='store_true', default=False)
-    parser.add_argument('--eval', type=str, choices=['best', 'final'], default="best")
+    parser.add_argument('--eval', type=str, choices=['best', 'final'], default="auc")
     parser.add_argument('--batch-eval-size', type=int, default=16)
     parser.add_argument('--num-workers', type=int, default=16)
     parser.add_argument('--loss', type=str, default='ce', choices=['ce','focal','wce']) # ce,focal,wce
     parser.add_argument('--wcew', type=float, default=25) # ce,focal,wce
+    parser.add_argument('--fake', action='store_true', default=False) # color constancy
+
     args, _ = parser.parse_known_args()
     return args
 
@@ -88,7 +90,10 @@ def get_metrics(y, score):
     acc = (tp+tn)/(tp+tn+fp+fn)
     sen = tp/(tp+fn)
     spec = tn/(tn+fp)
-    pre = tp/(tp+fp)
+    if tp+fp==0:
+        pre=1.0
+    else:   
+        pre = tp/(tp+fp)
     rec = tp/(tp+fn)
     f1=2*pre*rec/(pre+rec)
     return auc,acc,sen,spec,pre,rec,f1
@@ -166,8 +171,8 @@ def val_epoch(model, loader, mel_idx, n_test=1, get_output=False):
         if get_output:
             return CLASS_LOGITS, CLASS_PROBS, BARRIER_LOGITS, BARRIER_PROBS
         else:
-            class_auc,class_acc,class_sen,class_spec,class_pre,class_rec,class_f1=get_metrics((CLASS_TARGETS == 1).astype(float), CLASS_PROBS[:, 1])
-            barrier_auc,barrier_acc,barrier_sen,barrier_spec,barrier_pre,barrier_rec,barrier_f1=get_metrics((BARRIER_TARGETS == 1).astype(float), BARRIER_PROBS[:, 1])
+            class_auc,class_acc,class_sen,class_spec,class_pre,class_rec,class_f1=get_metrics((CLASS_TARGETS == 1).astype(float), CLASS_PROBS[:, 1]) # 由于上面对取值做了修改  无论9还是2分类这里都是1
+            barrier_auc,barrier_acc,barrier_sen,barrier_spec,barrier_pre,barrier_rec,barrier_f1=get_metrics((BARRIER_TARGETS == 0).astype(float), BARRIER_PROBS[:, 0])
             class_acc_0=class_spec
             class_acc_1=class_sen
             barrier_acc_0=barrier_spec

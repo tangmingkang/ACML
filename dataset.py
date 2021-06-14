@@ -20,7 +20,7 @@ class MMDataset(Dataset):
         elif args.out_dim==9:
             self.mel=4
         self.num=0
-        self.meta_columns=['age_approx'] + [col for col in csv.columns if col.startswith('site_')]
+        self.meta_columns=['age_approx', 'n_images', 'image_size'] + [col for col in csv.columns if col.startswith('site_')]
         self.cc = args.cc
         cc_methods={
             'max_rgb':max_rgb
@@ -101,13 +101,16 @@ def get_df(args):
     df_train['filepath'] = df_train['image_name'].apply(lambda x: os.path.join(args.train_data_dir, f'{x}.jpg'))
     df_test = pd.read_csv(os.path.join(args.label_dir, f'outdim{args.out_dim}_dann{args.n_dann_dim}/test.csv'), dtype={'image_name':str})
     df_test['filepath'] = df_test['image_name'].apply(lambda x: os.path.join(args.test_data_dir, f'{x}.jpg'))
+    df_fake = pd.read_csv(os.path.join(args.label_dir, f'fake.csv'), dtype={'image_name':str})
+    df_fake['filepath'] = df_fake['image_name'].apply(lambda x: os.path.join('melanoma', f'{x}.jpg'))
     if args.fold_type=='fold+':
         foldmap = {
             8:0, 5:0, 11:0, 15:0,
             7:1, 0:1, 6:1, 19:1,
             10:2, 12:2, 13:2, 18:2,
             9:3, 1:3, 3:3, 16:3,
-            14:4, 2:4, 4:4, 17:4
+            14:4, 2:4, 4:4, 17:4,
+            -1:-1
         }
     elif args.fold_type=='fold++':
         foldmap = {
@@ -115,13 +118,20 @@ def get_df(args):
             1:1, 10:1, 13:1, 15:1,
             0:2, 9:2, 12:2, 17:2,
             3:3, 8:3, 11:3, 19:3,
-            6:4, 7:4, 14:4, 18:4
+            6:4, 7:4, 14:4, 18:4,
+            -1:-1
         }
     else:
         foldmap = {i: i % 5 for i in range(20)}
+        foldmap[-1]=-1
     df_train['fold'] = df_train['fold'].map(foldmap)
     if args.out_dim==9:
         _idx=4 # 4对应为mm
+        df_fake['target']=4
     else:
+        df_fake['target']=1
         _idx=1
+    if args.fake:
+        df_train=pd.concat([df_train, df_fake], axis=0)
+    
     return df_train,df_test, _idx

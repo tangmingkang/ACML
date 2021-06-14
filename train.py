@@ -34,10 +34,10 @@ def get_args():
     parser.add_argument('--train-data-dir', type=str, default='./datasets/images/ISIC2020/jpeg/train_1024')
     parser.add_argument('--test-data-dir', type=str, default='./datasets/images/ISIC2020/jpeg/test_1024')
     parser.add_argument('--lock-file', type=str, default='lock.txt')
-    parser.add_argument('--CUDA_VISIBLE_DEVICES', type=str, default='0,1,2,3,4,5,6')
-    parser.add_argument('--enet-type', type=str, default='tf_efficientnet_b5_ns')
+    parser.add_argument('--CUDA_VISIBLE_DEVICES', type=str, default='0,1,2,3')
+    parser.add_argument('--enet-type', type=str, default='efficientnet_b3')
     parser.add_argument('--kernel-type', type=str, default='') # 模型保存名字，不指定则使用默认名称，不需要修改
-    parser.add_argument('--out-dim', type=int, default=2) # 9分类
+    parser.add_argument('--out-dim', type=int, default=9) # 
     parser.add_argument('--image-size', type=int, default=512)  # resize后的图像大小
     parser.add_argument('--fold-type',type=str,default='') # 将20个fold映射为五个，可选为'fold+' 'fold++' ''
     parser.add_argument('--train-fold', type=str, default='0') # train folds分别作为验证集
@@ -53,15 +53,18 @@ def get_args():
     parser.add_argument('--batch-size', type=int, default=32)
     parser.add_argument('--batch-eval-size', type=int, default=8)
     parser.add_argument('--init-lr', type=float, default=3e-5)
-    parser.add_argument('--n-epochs', type=int, default=20)
-    parser.add_argument('--num-workers', type=int, default=8)
+    parser.add_argument('--n-epochs', type=int, default=15)
+    parser.add_argument('--num-workers', type=int, default=16)
     parser.add_argument('--n-gpu', type=int, default=1)
     parser.add_argument('--local-rank', type=int, default=0)
     parser.add_argument('--rank', type=int, default=0)
     parser.add_argument('--world-size', type=int, default=0)
-    parser.add_argument('--loss', type=str, default='focal', choices=['ce','focal','wce']) # ce,focal,wce
+    parser.add_argument('--loss', type=str, default='ce', choices=['ce','focal','wce']) # ce,focal,wce
     parser.add_argument('--wcew', type=float, default=20) # ce,focal,wce
+    parser.add_argument('--fake', action='store_true', default=True) # ce,focal,wce
     args, _ = parser.parse_known_args()
+    
+    
     return args
 
 
@@ -101,7 +104,10 @@ def get_metrics(y, score):
     acc = (tp+tn)/(tp+tn+fp+fn)
     sen = tp/(tp+fn)
     spec = tn/(tn+fp)
-    pre = tp/(tp+fp)
+    if tp+fp==0:
+        pre=1.0
+    else:   
+        pre = tp/(tp+fp)
     rec = tp/(tp+fn)
     f1=2*pre*rec/(pre+rec)
     return auc,acc,sen,spec,pre,rec,f1
@@ -174,7 +180,7 @@ def val_epoch(model, loader, mel_idx, criterion, barrier_criterion, device, n_te
         if get_output:
             return CLASS_LOGITS, CLASS_PROBS, BARRIER_LOGITS, BARRIER_PROBS
         else:
-            class_auc,class_acc,class_sen,class_spec,class_pre,class_rec,class_f1=get_metrics((CLASS_TARGETS == 1).astype(float), CLASS_PROBS[:, 1])
+            class_auc,class_acc,class_sen,class_spec,class_pre,class_rec,class_f1=get_metrics((CLASS_TARGETS == mel_idx).astype(float), CLASS_PROBS[:, mel_idx])
             barrier_auc,barrier_acc,barrier_sen,barrier_spec,barrier_pre,barrier_rec,barrier_f1=get_metrics((BARRIER_TARGETS == 1).astype(float), BARRIER_PROBS[:, 1])
             class_acc_0=class_spec
             class_acc_1=class_sen
@@ -220,7 +226,7 @@ def val_epoch(model, loader, mel_idx, criterion, barrier_criterion, device, n_te
         if get_output:
             return CLASS_LOGITS, CLASS_PROBS
         else:
-            class_auc,class_acc,class_sen,class_spec,class_pre,class_rec,class_f1=get_metrics((CLASS_TARGETS == 1).astype(float), CLASS_PROBS[:, 1])
+            class_auc,class_acc,class_sen,class_spec,class_pre,class_rec,class_f1=get_metrics((CLASS_TARGETS == mel_idx).astype(float), CLASS_PROBS[:, mel_idx])
             class_acc_0=class_spec
             class_acc_1=class_sen
             return class_val_loss, class_acc, class_auc, class_acc_0, class_acc_1, class_pre, class_rec, class_f1, class_sen, class_spec
@@ -294,10 +300,10 @@ def run(fold, df, transforms_train, transforms_val, _idx, log_file):
 
     if args.DEBUG:
         args.n_epochs = 3
-        df_train = df[df['fold'] != fold].sample(args.batch_size * 5)
+        df_train = df[(df['fold'] != fold) | (df['fold'] == -1)].sample(args.batch_size * 5)
         df_valid = df[df['fold'] == fold].sample(args.batch_size * 5)
     else:
-        df_train = df[df['fold'] != fold]
+        df_train = df[(df['fold'] != fold) | (df['fold'] == -1)]
         df_valid = df[df['fold'] == fold]
 
     device = torch.device("cuda", args.local_rank)
@@ -305,10 +311,9 @@ def run(fold, df, transforms_train, transforms_val, _idx, log_file):
     if args.loss == 'ce':
         criterion = nn.CrossEntropyLoss()
     elif args.loss == 'focal':
-        weight_CE = None
-        # weight_CE = torch.FloatTensor([0.75]*args.out_dim)
-        # weight_CE[_idx]=0.25
-        # weight_CE=weight_CE.to(device)
+        weight_CE = torch.FloatTensor([0.75]*args.out_dim)
+        weight_CE[_idx]=0.25
+        weight_CE=weight_CE.to(device)
         criterion = FocalLoss(args.out_dim,alpha=weight_CE)
     elif args.loss == 'wce':
         weight_CE = torch.FloatTensor([1]*args.out_dim)
@@ -369,7 +374,7 @@ def run(fold, df, transforms_train, transforms_val, _idx, log_file):
                 print(content)
             else:
                 val_loss, acc, auc, acc_0, acc_1, class_pre, class_rec, class_f1, class_sen, class_spec= val_epoch(model, valid_loader, _idx, criterion, barrier_criterion, device)
-                content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, train loss: {train_loss:.5f}, valid loss: {(val_loss):.5f}, acc: {(acc):.4f}, auc: {(auc):.6f} spec: {(class_spec):.6f}, sen: {(class_sen):.6f}.\n'
+                content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, train loss: {train_loss:.5f}, valid loss: {(val_loss):.5f}, acc: {(acc):.4f}, auc: {(auc):.6f} spec: {(class_spec):.6f}, sen: {(class_sen):.6f}\n'
                 print(content)
             if auc > auc_max:
                 content+='auc_max ({:.6f} --> {:.6f}). Saving model ...\n'.format(auc_max, auc)
@@ -448,6 +453,8 @@ if __name__ == '__main__':
                 args.kernel_type+='_cc'+args.cc_method
             if args.DANN:
                 args.kernel_type+='_DANN'+str(args.n_dann_dim)
+            if args.fake:
+                args.kernel_type+='_fakedata'
         else:
             args.kernel_type=kernel_type
         args.kernel_type+=f'_{args.fold_type}{fold}'
