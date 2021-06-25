@@ -5,6 +5,7 @@
 /visualization/*
 /weights/*
 melanoma
+PH2Dataset
 .*
 !.gitignore
 # Byte-compiled / optimized / DLL files
