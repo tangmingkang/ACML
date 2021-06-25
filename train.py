@@ -48,6 +48,8 @@ def get_args():
     parser.add_argument('--meta-model', type=str, default='joint', choices=['joint','adadec']) # meta模型,joint or adadec
     parser.add_argument('--cc', action='store_true', default=False) # color constancy
     parser.add_argument('--cc-method', type=str, default='max_rgb') # color constancy method
+    parser.add_argument('--remove', action='store_true', default=False) # color constancy
+    parser.add_argument('--remove-method', type=str, default='rm1') # color constancy method
     parser.add_argument('--n_meta_dim', type=str, default='512,128')
     parser.add_argument('--DEBUG', action='store_true', default=False)
     parser.add_argument('--batch-size', type=int, default=32)
@@ -62,6 +64,7 @@ def get_args():
     parser.add_argument('--loss', type=str, default='ce', choices=['ce','focal','wce']) # ce,focal,wce
     parser.add_argument('--wcew', type=float, default=20) # ce,focal,wce
     parser.add_argument('--fake', action='store_true', default=True) # ce,focal,wce
+    parser.add_argument('--fake_num', type=int, default=200) # ce,focal,wce
     args, _ = parser.parse_known_args()
     
     
@@ -454,7 +457,9 @@ if __name__ == '__main__':
             if args.DANN:
                 args.kernel_type+='_DANN'+str(args.n_dann_dim)
             if args.fake:
-                args.kernel_type+='_fakedata'
+                args.kernel_type+=f'_fakedata{args.fake_num}'
+            if args.remove:
+                args.kernel_type+=f'_{args.remove_method}'
         else:
             args.kernel_type=kernel_type
         args.kernel_type+=f'_{args.fold_type}{fold}'

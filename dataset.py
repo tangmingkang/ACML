@@ -7,6 +7,7 @@ import torch
 from torch.utils.data import Dataset
 from tqdm import tqdm
 from util.color_constancy import max_rgb
+from util.reduce_method import remove_function_1,remove_function_3
 
 class MMDataset(Dataset):
     def __init__(self, args, csv, mode, transform=None):
@@ -26,6 +27,12 @@ class MMDataset(Dataset):
             'max_rgb':max_rgb
         }
         self.cc_model = cc_methods[args.cc_method]
+        self.remove = args.remove
+        rm_methods={
+            'rm1':remove_function_1,
+            'rm3':remove_function_3
+        }
+        self.rm_model = rm_methods[args.remove_method]
     def __len__(self):
         return self.csv.shape[0]
     
@@ -41,6 +48,8 @@ class MMDataset(Dataset):
         image = cv2.imread(row.filepath) # 默认读出的是BGR模式
         if self.cc:
             image = self.cc_model(image)
+        if self.remove:
+            image = self.rm_model(image)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB) # m*n*3
         if self.transform is not None:
             res = self.transform(image=image)
